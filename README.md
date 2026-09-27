@@ -55,15 +55,19 @@ Your floor and position are remembered, so a page refresh puts you back where yo
 
 ## How an issue flows through the office
 
-1. **Backlog.** An issue is assigned to a developer, either by you (Kanban, terminal panel or manager's console) or automatically when **auto-assign** is on for that floor.
+1. **Backlog.** An issue is assigned to a developer, either by you (Kanban, terminal panel or manager's console) or automatically when **auto-assign** is on for that floor. Auto-assign keeps every developer busy while there's work that can start:
+   - An issue that says `Depends on #N` waits until #N is closed. Of the rest, the ones that hold up the longest chain of other issues go first, then the oldest.
+   - A `swarm:<specialty>` label is a preference, not a lock. A free specialist gets first pick, and otherwise the issue goes to whichever free developer is least needed for their own specialty.
+   - If a session fails, its issue goes back on the board for someone else, and the agent gets new work after a two-minute cooldown. An issue that fails twice waits for you to assign it by hand.
+   - If Claude turns a session away because your usage limit is reached, the office starts no new work until the limit resets.
 2. **In progress.** The server fetches the repo and creates a git worktree for that developer on the branch `swarm/issue-<n>-<agent>`, branched from the default branch. A Claude Code session starts there with the issue text. The developer implements the change, runs the project's checks, pushes the branch and opens a PR with `gh pr create` that says `Closes #<n>`.
-3. **In QA.** The PR is handed to the floor's QA lab. A free QA tester checks out the PR head in their own worktree, then:
+3. **In QA.** The PR is handed to the floor's QA lab. A free QA tester checks out the PR head in their own worktree; when every tester is busy, a free developer who didn't write the PR covers for them, `testing` specialists first. The tester then:
    - reads the PR and the linked issue to work out the acceptance criteria
    - runs the test suite, linters and build
    - exercises the feature in a real headless browser (Playwright), including phone sizes and edge cases, taking screenshots of each important state
    - returns a structured report: a verdict, the checks performed, the commands run, and a caption for each screenshot
 4. **Evidence on the PR.** The server uploads the screenshots to an orphan branch called `swarm-qa-evidence`, so evidence never lands in your code, and posts a comment on the PR. The comment contains the verdict, a table of checks, the commands run, and the screenshots.
-5. **Fail → fix → re-test.** If QA fails, the report goes back to the developer who wrote the PR, who resumes their own Claude Code session and pushes fixes to the same branch. The PR then goes back to QA for the next round. After 3 failed rounds it's flagged **needs you**.
+5. **Fail → fix → re-test.** If QA fails, the report goes back to the developer who wrote the PR, who resumes their own Claude Code session and pushes fixes to the same branch. If they're busy on something else, any free developer takes the fix instead. The PR then goes back to QA for the next round. After 3 failed rounds it's flagged **needs you**.
 6. **Ready to merge.** Once QA passes, the PR moves to **Ready to merge**. Review it on GitHub, including the QA comment, then press **Merge** (squash) on the board. The developer sees the merge, celebrates, and goes back to the backlog. Merging a PR that hasn't passed QA asks you to confirm first.
 
 PRs opened by people, not agents, show up under **In QA** as "not tested yet", with a **Send to QA** button.

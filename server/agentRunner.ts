@@ -46,6 +46,8 @@ export interface SessionCallbacks {
   screenshot(data: Buffer, mime: string): void;
   /** The final text of each turn: the reply to the prompt and to every message sent while it ran. */
   turn?(text: string): void;
+  /** Claude turned the session away for the subscription's usage limit (epoch ms when it resets, if known). */
+  limited?(resetsAt: number | null): void;
   finished(result: SessionResult): void;
 }
 
@@ -340,6 +342,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
         if (info.status !== 'allowed') {
           const when = info.resetsAt ? new Date(info.resetsAt * 1000).toLocaleTimeString() : 'later';
           cb.log([{ kind: 'error', text: `⚠ Subscription usage ${info.status === 'rejected' ? 'limit reached' : 'warning'} (${info.rateLimitType ?? 'limit'}) · resets ${when}` }]);
+          const overage = info.isUsingOverage || info.overageStatus === 'allowed' || info.overageStatus === 'allowed_warning';
+          if (info.status === 'rejected' && !overage) cb.limited?.(info.resetsAt ? info.resetsAt * 1000 : null);
         }
         break;
       }

@@ -9,7 +9,7 @@ import { HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, jobLabel, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools } from './ceo.ts';
 import { HttpError } from './httpError.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
-import { blockers, issueSpecialty } from '../shared/issues.ts';
+import { blockers, holdUps, issueSpecialty } from '../shared/issues.ts';
 import { CEO_ID } from '../shared/types.ts';
 import type {
   AgentLook,
@@ -210,6 +210,12 @@ const slugify = (s: string) =>
 
 const BUSY: AgentStatus[] = ['preparing', 'working'];
 const FREE: AgentStatus[] = ['idle', 'done'];
+// An agent whose session failed sits out this long before taking new work, so a broken setup can't burn through the queue.
+const ERROR_COOLDOWN_MS = 2 * 60_000;
+// Auto-assign stops retrying an issue after this many failed sessions; the manager can still assign it by hand.
+const MAX_ISSUE_FAILURES = 2;
+// How long the office waits after Claude's usage limit is hit when Claude doesn't say when it resets.
+const LIMIT_PAUSE_MS = 15 * 60_000;
 
 // The latest browser screenshot per agent is kept on disk so monitors survive a server restart.
 const SCREENS_DIR = path.join(HOME_DIR, 'screens');
@@ -900,6 +906,10 @@ export class Swarm {
       if (a.repoId !== repo.id || a.role !== 'dev' || a.prNumber == null || BUSY.includes(a.status) || a.status === 'idle') continue;
       const pr = pulls.find((p) => p.number === a.prNumber);
       if (!pr || pr.state === 'OPEN') continue;
+      if (a.task === 'qa') {
+        this.clearTask(a); // they only tested it
+        continue;
+      }
       this.appendLog(a, [{ kind: 'done', text: pr.state === 'MERGED' ? `🎉 PR #${pr.number} was merged. Ready for the next issue.` : `PR #${pr.number} was closed without merging.` }]);
       this.clearTask(a);
     }
@@ -917,7 +927,7 @@ export class Swarm {
     for (const pr of pulls) {
       if (pr.state !== 'OPEN' || pr.isDraft || !pr.headRefName.startsWith('swarm/')) continue;
       if (this.state.qa.some((q) => q.repoId === repo.id && q.prNumber === pr.number)) continue;
-      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && (a.prNumber === pr.number || a.branch === pr.headRefName));
+      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === pr.number || a.branch === pr.headRefName));
       this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);
     }
     this.save();
@@ -1109,7 +1119,7 @@ export class Swarm {
   }
 
   private issueTaken(repo: PersistedRepo, n: number) {
-    if (this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && a.issueNumber === n && a.status !== 'idle')) return true;
+    if (this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.issueNumber === n && a.status !== 'idle' && a.status !== 'error')) return true;
     const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
     return pulls.some((p) => p.state === 'OPEN' && (p.closesIssues.includes(n) || p.headRefName.startsWith(`swarm/issue-${n}-`)));
   }
@@ -1212,6 +1222,7 @@ export class Swarm {
     } catch (err) {
       if (a.status !== 'preparing') return null;
       a.status = 'error';
+      a.endedAt = Date.now();
       a.lastError = (err as Error).message;
       this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
       this.emitAgent(a);
@@ -1267,7 +1278,7 @@ export class Swarm {
         browserTesting: repo.browserTesting,
         permissionMode: this.state.settings.permissionMode,
         additionalDirectories: this.linkedRepos(repo).map((r) => this.backend.mainDir(r.fullName)),
-        role: a.role,
+        role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
         outputSchema,
         resumeSessionId,
       },
@@ -1296,6 +1307,7 @@ export class Swarm {
             .then(() => fs.writeFile(screenFile(a.id, mime), data))
             .catch((err) => console.warn('could not save screenshot', err));
         },
+        limited: (at) => this.pauseForLimit(at),
         finished: (result) => void this.onFinished(a, repo, result),
       },
       repo.defaultBranch,
@@ -1349,7 +1361,11 @@ export class Swarm {
     }
 
     if (a.status === 'stopped') return; // the manager already logged the stop
-    if (!result.ok) return this.fail(a, result, `#${a.issueNumber}`);
+    if (!result.ok) {
+      this.issueFailed(repo, a.issueNumber);
+      return this.fail(a, result, `#${a.issueNumber}`);
+    }
+    this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
     a.status = 'done';
     this.appendLog(a, [{ kind: 'done', text: `✔ Finished in ${this.minutes(a)}m · ${a.turns} turns${a.prNumber ? ` · PR #${a.prNumber}` : ' · no PR found'}` }]);
     if (a.prNumber) {
@@ -1403,7 +1419,7 @@ export class Swarm {
       rec.round += 1;
       rec.sessionFailures = 0;
     }
-    const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && (a.prNumber === prNumber || a.branch === pr.headRefName));
+    const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || a.branch === pr.headRefName));
     this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null);
     this.toast('info', `PR #${prNumber} is queued for QA`);
   }
@@ -1412,6 +1428,7 @@ export class Swarm {
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("Office Swarm"). Developers open pull requests; you independently verify that each one really works before the manager merges it. Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
       ...(a.brief ? ['', `Your job description:\n${a.brief}`] : []),
+      ...(a.role === 'dev' ? ['', "You're a developer covering for the QA lab while its testers are busy. You didn't write this pull request: test it as an independent QA engineer would."] : []),
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
       ...(repo.summary ? [`Project: ${repo.summary}`] : []),
@@ -1453,6 +1470,7 @@ export class Swarm {
       this.emitAgent(a);
     } catch (err) {
       a.status = 'error';
+      a.endedAt = Date.now();
       a.lastError = (err as Error).message;
       this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
       this.setQa(rec, { status: 'queued', qaAgentId: null });
@@ -1498,7 +1516,7 @@ export class Swarm {
     if (a.status === 'stopped' || !report) {
       if (a.status !== 'stopped') this.fail(a, { ...result, errors: result.errors.length ? result.errors : ['QA finished without a usable report'] }, `QA of PR #${a.prNumber}`);
       if (rec) {
-        const failures = rec.sessionFailures + 1;
+        const failures = rec.sessionFailures + (this.limited() ? 0 : 1); // the usage limit isn't the PR's fault
         this.setQa(rec, {
           status: a.status === 'stopped' || failures >= 2 ? 'needs-human' : 'queued',
           qaAgentId: null,
@@ -1629,7 +1647,9 @@ export class Swarm {
     }
     if (!result.ok) {
       this.fail(a, result, `the fix for PR #${a.prNumber}`);
-      if (rec) this.setQa(rec, { status: 'needs-human' });
+      // Someone else gets a go before it lands on the manager.
+      const failures = rec ? rec.sessionFailures + (this.limited() ? 0 : 1) : 0;
+      if (rec) this.setQa(rec, { status: failures >= 2 ? 'needs-human' : 'failed', sessionFailures: failures });
       return;
     }
     a.status = 'done';
@@ -1653,7 +1673,7 @@ export class Swarm {
     }
     if (a.role === 'qa') throw new HttpError(409, `${a.name} isn't testing anything right now. Send a PR to QA from the Kanban board.`);
     if (a.status === 'preparing') throw new HttpError(409, `${a.name} is still setting up; try again in a moment`);
-    if (!a.sessionId || !a.branch) throw new HttpError(409, `${a.name} has no session to continue. Assign an issue instead.`);
+    if (!a.sessionId || !a.branch || a.task === 'qa') throw new HttpError(409, `${a.name} has no session to continue. Assign an issue instead.`);
     this.ensureSlot();
     this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${text}` }]);
     const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
@@ -1700,26 +1720,81 @@ export class Swarm {
 
   // ---------- scheduling ----------
 
-  private free(repo: PersistedRepo, role: AgentRole) {
-    return this.state.agents.filter((a) => a.repoId === repo.id && a.role === role && FREE.includes(a.status)).sort((x, y) => x.desk - y.desk);
+  /**
+   * Agents on a floor who can take work now. One whose last session failed sits out a short cooldown, then gets work
+   * like everyone else instead of waiting for the manager to reset them.
+   */
+  private available(repo: PersistedRepo, role: AgentRole) {
+    const now = Date.now();
+    return this.state.agents
+      .filter((a) => a.repoId === repo.id && a.role === role && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
+      .sort((x, y) => x.desk - y.desk);
   }
 
   private scheduleOffset = 0;
+  private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
+  private pausedUntil = 0; // Claude's usage limit was hit: nothing new starts before this
 
-  /** Start QA on the oldest waiting PR, or send a failed PR back to its developer. Returns true if work started. */
+  /** Backlog issues that can start now, most urgent first: the ones holding up the longest chain of other issues, then the oldest. */
+  private readyIssues(repo: PersistedRepo) {
+    const issues = this.repoRt.get(repo.id)!.issues;
+    const open = new Set(issues.map((i) => i.number));
+    const weight = holdUps(issues);
+    return issues
+      .filter(
+        (i) =>
+          !i.labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l)) &&
+          !this.issueTaken(repo, i.number) &&
+          blockers(i.body, open).length === 0 &&
+          (this.issueFailures.get(`${repo.id}#${i.number}`) ?? 0) < MAX_ISSUE_FAILURES,
+      )
+      .map((issue) => ({ issue, want: issueSpecialty(issue.labels), ...weight.get(issue.number)! }))
+      .sort((x, y) => y.chain - x.chain || y.waiting - x.waiting || x.issue.number - y.issue.number);
+  }
+
+  /**
+   * The free developer to put on a job: one it `suits` first, then whoever is least needed elsewhere (fewest ready
+   * issues in their specialty, then the least open work in it), so specialists stay free for their own lane.
+   */
+  private pickDev(repo: PersistedRepo, devs: PersistedAgent[], suits: (a: PersistedAgent) => boolean) {
+    if (devs.length <= 1) return devs[0];
+    const ready = this.readyIssues(repo).map((r) => r.want);
+    const open = this.repoRt.get(repo.id)!.issues.map((i) => issueSpecialty(i.labels));
+    const rank = (a: PersistedAgent) => {
+      const s = a.specialty.toLowerCase();
+      return [suits(a) ? 0 : 1, ready.filter((w) => w === s).length, open.filter((w) => w === s).length, a.desk];
+    };
+    return devs
+      .map((a) => ({ a, r: rank(a) }))
+      .sort((x, y) => x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3])[0].a;
+  }
+
+  /**
+   * Finish work in flight: test queued PRs (oldest first) and get failed ones fixed. Returns true if work started.
+   * QA testers test; when they're all busy, a free developer who didn't write the PR covers for them, so QA never
+   * holds up the floor. A failed PR goes back to its author when they're free, and otherwise to any free developer.
+   */
   private startPipelineWork(repo: PersistedRepo): boolean {
-    const queued = this.state.qa.filter((q) => q.repoId === repo.id && q.status === 'queued').sort((x, y) => x.updatedAt - y.updatedAt)[0];
-    const tester = queued && this.free(repo, 'qa')[0];
-    if (queued && tester) {
-      void this.runQa(tester, repo, queued);
+    const devs = this.available(repo, 'dev');
+    const testers = this.available(repo, 'qa');
+    const waiting = (status: QaRecord['status']) => this.state.qa.filter((q) => q.repoId === repo.id && q.status === status).sort((x, y) => x.updatedAt - y.updatedAt);
+    for (const rec of waiting('queued')) {
+      const tester =
+        testers[0] ??
+        this.pickDev(
+          repo,
+          devs.filter((a) => a.id !== rec.devAgentId),
+          (a) => /test|qa/i.test(a.specialty),
+        );
+      if (!tester) continue;
+      void this.runQa(tester, repo, rec);
       return true;
     }
-    const failed = this.state.qa.filter((q) => q.repoId === repo.id && q.status === 'failed').sort((x, y) => x.updatedAt - y.updatedAt);
-    for (const rec of failed) {
-      const original = rec.devAgentId ? this.state.agents.find((x) => x.id === rec.devAgentId) : undefined;
-      // Prefer the author; only hand it to someone else if the author has left the floor.
-      const dev = original ? (FREE.includes(original.status) ? original : undefined) : this.free(repo, 'dev')[0];
-      if (!dev) continue;
+    for (const rec of waiting('failed')) {
+      const issue = this.repoRt.get(repo.id)!.issues.find((i) => i.number === rec.issueNumber);
+      const want = issue ? issueSpecialty(issue.labels) : null;
+      const dev = devs.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, devs, (a) => a.specialty.toLowerCase() === want);
+      if (!dev) break;
       void this.runFix(dev, repo, rec);
       return true;
     }
@@ -1728,27 +1803,46 @@ export class Swarm {
 
   /**
    * Give a free developer the next backlog issue (auto-assign floors only). Returns true if work started.
-   * Issues labelled swarm:<specialty> wait for that specialist when the floor has one; issues that say
-   * "Depends on #N" wait until #N is closed.
+   * Issues that say "Depends on #N" wait until #N is closed; the rest go in readyIssues() order. A swarm:<specialty>
+   * label is a preference, not a lock: a free specialist gets first pick, and otherwise the issue goes to whichever
+   * free developer is least needed elsewhere, so nobody sits idle while there is work that can start.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
-    const rt = this.repoRt.get(repo.id)!;
     if (!repo.autoAssign) return false;
-    const free = this.free(repo, 'dev');
-    if (free.length === 0) return false;
-    const specialties = new Set(this.state.agents.filter((a) => a.repoId === repo.id && a.role === 'dev' && a.specialty).map((a) => a.specialty));
-    const open = new Set(rt.issues.map((i) => i.number));
-    for (const issue of rt.issues) {
-      if (issue.labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l)) || this.issueTaken(repo, issue.number)) continue;
-      if (blockers(issue.body, open).length) continue;
-      const want = issueSpecialty(issue.labels);
-      const agent = want && specialties.has(want) ? free.find((a) => a.specialty === want) : (free.find((a) => !a.specialty) ?? free[0]);
-      if (!agent) continue;
-      // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
-      void this.assign(agent.id, issue.number).catch((err) => console.warn('auto-assign failed', err));
-      return agent.status === 'preparing';
+    const free = this.available(repo, 'dev');
+    const ready = free.length ? this.readyIssues(repo) : [];
+    if (ready.length === 0) return false;
+    const fits = (a: PersistedAgent, want: string) => a.specialty.toLowerCase() === want;
+    // Of the issues holding up the most, take one a free specialist fits.
+    const pick = ready.find((r) => r.chain === ready[0].chain && free.some((a) => fits(a, r.want))) ?? ready[0];
+    const agent = this.pickDev(repo, free, (a) => fits(a, pick.want))!;
+    // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
+    void this.assign(agent.id, pick.issue.number).catch((err) => console.warn('auto-assign failed', err));
+    return agent.status === 'preparing';
+  }
+
+  private limited() {
+    return Date.now() < this.pausedUntil;
+  }
+
+  /** Claude turned a session away for the usage limit: start nothing new until it resets, rather than failing agent after agent. */
+  private pauseForLimit(resetsAt: number | null) {
+    const until = (resetsAt ?? Date.now() + LIMIT_PAUSE_MS) + 30_000;
+    if (until <= this.pausedUntil) return;
+    const fresh = Date.now() >= this.pausedUntil;
+    this.pausedUntil = until;
+    if (fresh) this.postMessage('office', `⏸ Claude's usage limit was reached. The office starts no new work until ${new Date(until).toLocaleTimeString()}; sessions already running carry on.`);
+  }
+
+  /** A failed session releases its issue for someone else; an issue that keeps failing waits for the manager. */
+  private issueFailed(repo: PersistedRepo, n: number | null) {
+    if (n == null || this.limited()) return; // the usage limit isn't the issue's fault
+    const key = `${repo.id}#${n}`;
+    const failures = (this.issueFailures.get(key) ?? 0) + 1;
+    this.issueFailures.set(key, failures);
+    if (failures === MAX_ISSUE_FAILURES) {
+      this.postMessage('office', `⚠️ Issue #${n} on ${repo.fullName} failed ${failures} sessions in a row, so auto-assign skips it now. Assign it to someone by hand once it's sorted.`);
     }
-    return false;
   }
 
   /**
@@ -1757,6 +1851,7 @@ export class Swarm {
    * so no repo can hog the slots.
    */
   private schedule() {
+    if (this.limited()) return;
     // Management first: the CEO's jobs are short and shape everyone else's work.
     this.maybeHeartbeat();
     this.startCeoWork();
@@ -1961,6 +2056,7 @@ export class Swarm {
         browserUrl: () => undefined,
         screenshot: () => undefined,
         turn: (text) => this.postMessage('ceo', text),
+        limited: (at) => this.pauseForLimit(at),
         finished: (result) => this.onCeoFinished(a, result),
       },
       '',
@@ -2185,6 +2281,13 @@ export class Swarm {
           qaBrief: r.qaBrief || null,
           preview: { command: r.preview.command, env: r.preview.env, status: this.previews.view(r).status },
           autoAssign: r.autoAssign,
+          capacity: {
+            developers: this.state.agents.filter((a) => a.repoId === r.id && a.role === 'dev').length,
+            developersFree: this.available(r, 'dev').length,
+            issuesReadyToStart: this.readyIssues(r).length,
+            issuesWaitingOnOthers: rt.issues.filter((i) => blockers(i.body, open).length > 0).length,
+            longestDependencyChain: Math.max(0, ...[...holdUps(rt.issues).values()].map((w) => w.chain)),
+          },
           team: this.state.agents
             .filter((a) => a.repoId === r.id)
             .map((a) => ({
