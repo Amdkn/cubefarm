@@ -593,6 +593,20 @@ input.inline:focus {
   padding: 6px 10px;
   pointer-events: none;
 }
+/* `?stats` readout: tucked into the top-left corner above everything, including open panels */
+.stats {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  padding: 1px 8px;
+  font: 10px/1.2 var(--mono);
+  color: #7cffb2;
+  background: rgba(21, 21, 31, 0.8);
+  border-bottom-right-radius: 8px;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .fade {
   position: absolute;
   inset: 0;
