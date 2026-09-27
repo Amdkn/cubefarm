@@ -1,0 +1,58 @@
+import { Suspense, useEffect, useMemo } from 'react';
+import { Canvas } from '@react-three/fiber';
+import * as THREE from 'three';
+import { repoOnFloor, useStore } from '../store';
+import { ding } from '../ui/sfx';
+import { lobbyColliders, officeColliders } from './layout';
+import { Lobby } from './Lobby';
+import { OfficeFloor } from './OfficeFloor';
+import { Player } from './Player';
+import { Lights } from './Shell';
+
+function Travel() {
+  const travel = useStore((s) => s.travel);
+  const finish = useStore((s) => s.finishTravel);
+  useEffect(() => {
+    if (!travel) return;
+    const t = setTimeout(
+      () => {
+        if (travel.phase === 'closing') {
+          finish('arrived');
+          ding();
+        } else finish('done');
+      },
+      travel.phase === 'closing' ? 750 : 650,
+    );
+    return () => clearTimeout(t);
+  }, [travel, finish]);
+  return null;
+}
+
+export function Game() {
+  const floor = useStore((s) => s.floor);
+  const repos = useStore((s) => s.repos);
+  const repo = floor === 0 ? null : repoOnFloor(repos, floor);
+  const isOffice = !!repo;
+  const colliders = useMemo(() => (isOffice ? officeColliders() : lobbyColliders()), [isOffice]);
+
+  return (
+    <Canvas
+      shadows
+      dpr={[1, 1.75]}
+      camera={{ fov: 72, near: 0.05, far: 90, position: [0, 1.65, 10] }}
+      gl={{ antialias: true, powerPreference: 'high-performance' }}
+      onCreated={({ gl }) => {
+        gl.toneMapping = THREE.ACESFilmicToneMapping;
+        gl.toneMappingExposure = 1.0;
+        gl.shadowMap.type = THREE.PCFSoftShadowMap;
+      }}
+    >
+      <color attach="background" args={['#bfe3ff']} />
+      <fog attach="fog" args={['#f3ece2', 30, 70]} />
+      <Lights />
+      <Suspense fallback={null}>{repo ? <OfficeFloor key={repo.id} repo={repo} /> : <Lobby />}</Suspense>
+      <Player colliders={colliders} floor={floor} />
+      <Travel />
+    </Canvas>
+  );
+}

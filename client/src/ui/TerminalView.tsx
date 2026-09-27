@@ -1,0 +1,240 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../api';
+import { isBusy, kanbanFor, agentsOnRepo, useStore } from '../store';
+import { closeOverlay, Panel } from './Overlays';
+import { toolVerb } from '../world/draw';
+
+const STATUS_LABEL: Record<string, string> = {
+  idle: 'free',
+  preparing: 'setting up',
+  working: 'working',
+  done: 'done',
+  error: 'needs help',
+  stopped: 'stopped',
+};
+
+export function StatusPill({ status }: { status: string }) {
+  return <span className={`status status-${status}`}>{STATUS_LABEL[status] ?? status}</span>;
+}
+
+function elapsed(from: number | null, to: number | null) {
+  if (!from) return '';
+  const s = Math.max(0, Math.floor(((to ?? Date.now()) - from) / 1000));
+  return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+export function TerminalView({ agentId }: { agentId: string }) {
+  const agent = useStore((s) => s.agents[agentId]);
+  const log = useStore((s) => s.logs[agentId]) ?? [];
+  const shotAt = useStore((s) => s.screens[agentId]);
+  const repo = useStore((s) => s.repos.find((r) => r.id === s.agents[agentId]?.repoId));
+  const allAgents = useStore((s) => s.agents);
+  const settings = useStore((s) => s.settings);
+  const [text, setText] = useState('');
+  const [issue, setIssue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [, tick] = useState(0);
+  const scroller = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [log.length]);
+
+  const qaRecords = useStore((s) => s.qa);
+  const cols = useMemo(() => (repo ? kanbanFor(repo, agentsOnRepo(allAgents, repo.id), qaRecords) : null), [repo, allAgents, qaRecords]);
+  const isQa = agent?.role === 'qa';
+  // Devs pick issues from the backlog; QA testers pick untested pull requests.
+  const choices = !cols ? [] : isQa ? cols.qa.filter((c) => !c.qa || c.qa.status === 'needs-human' || c.qa.status === 'queued') : cols.backlog;
+
+  if (!agent || !repo) {
+    return (
+      <Panel title="Terminal">
+        <p className="muted">That agent has left the building.</p>
+      </Panel>
+    );
+  }
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch {
+      // api() already toasted
+    } finally {
+      setBusy(false);
+    }
+  };
+  const working = isBusy(agent);
+  const issueUrl = agent.issueNumber ? `https://github.com/${repo.fullName}/issues/${agent.issueNumber}` : null;
+  const canMessage = working || (!isQa && !!agent.branch && agent.status !== 'idle');
+  const qaRec = agent.prNumber ? qaRecords[`${repo.id}#${agent.prNumber}`] : undefined;
+
+  return (
+    <Panel
+      wide
+      accent={agent.color}
+      title={
+        <div className="term-title">
+          <span className="avatar" style={{ background: agent.color }}>
+            {agent.name[0]}
+          </span>
+          <span>{agent.name}</span>
+          {isQa && <span className="chip">🔍 QA tester</span>}
+          <StatusPill status={agent.status} />
+          {working && agent.currentTool && <span className="muted small">{toolVerb(agent.currentTool)}…</span>}
+        </div>
+      }
+    >
+      <div className="term-meta">
+        {agent.task === 'qa' && agent.status !== 'idle' ? (
+          <a href={agent.prUrl ?? '#'} target="_blank" rel="noreferrer">
+            Testing PR #{agent.prNumber}: {agent.issueTitle}
+          </a>
+        ) : agent.task === 'fix' && agent.status !== 'idle' ? (
+          <a href={agent.prUrl ?? '#'} target="_blank" rel="noreferrer">
+            Fixing PR #{agent.prNumber} after QA: {agent.issueTitle}
+          </a>
+        ) : agent.issueNumber && agent.status !== 'idle' ? (
+          <a href={issueUrl!} target="_blank" rel="noreferrer">
+            Issue #{agent.issueNumber}: {agent.issueTitle}
+          </a>
+        ) : (
+          <span className="muted">{isQa ? 'Nothing under test' : 'No issue assigned'}</span>
+        )}
+        {agent.prUrl && agent.task === 'issue' && (
+          <a href={agent.prUrl} target="_blank" rel="noreferrer" className="chip chip-good">
+            PR #{agent.prNumber}
+          </a>
+        )}
+        {qaRec && agent.status !== 'idle' && (
+          <span className={`chip ${qaRec.status === 'passed' ? 'chip-good' : ''}`}>
+            QA: {qaRec.status}
+            {qaRec.round > 1 ? ` · round ${qaRec.round}` : ''}
+          </span>
+        )}
+        {qaRec?.commentUrl && (
+          <a href={qaRec.commentUrl} target="_blank" rel="noreferrer">
+            QA report ↗
+          </a>
+        )}
+        {agent.branch && <code>{agent.branch}</code>}
+        <span className="muted">
+          {agent.model || settings.defaultModel} · {agent.effort || settings.defaultEffort} effort
+        </span>
+        {agent.startedAt && <span className="muted">⏱ {elapsed(agent.startedAt, working ? null : agent.endedAt)}</span>}
+        {agent.turns > 0 && <span className="muted">{agent.turns} turns</span>}
+        {agent.costUsd > 0 && <span className="muted" title="API-equivalent cost reported by Claude Code; subscription usage is billed by plan">≈${agent.costUsd.toFixed(2)}</span>}
+      </div>
+      {agent.lastError && agent.status !== 'working' && <div className="term-error">⚠️ {agent.lastError}</div>}
+
+      <div className={`term-split ${agent.hasScreenshot ? 'term-split-2' : ''}`}>
+        <div
+          className="term"
+          ref={scroller}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          }}
+        >
+          {log.length === 0 && <div className="term-line term-system">(no output yet)</div>}
+          {log.map((l) => (
+            <div key={l.id} className={`term-line term-${l.kind}`}>
+              {l.text || ' '}
+            </div>
+          ))}
+          {working && <div className="term-line term-spin">✻ {agent.status === 'preparing' ? 'Setting up worktree' : toolVerb(agent.currentTool) || 'Thinking'}… ({elapsed(agent.startedAt, null)})</div>}
+        </div>
+        {agent.hasScreenshot && (
+          <div className="browser">
+            <div className="browser-bar">🔒 {agent.browserUrl ?? 'about:blank'}</div>
+            <div className="browser-view">
+              <img src={`/api/agents/${agent.id}/screen?t=${shotAt ?? agent.screenshotAt}`} alt="Latest browser screenshot from the agent" />
+            </div>
+            <div className="muted small">Latest Playwright screenshot{agent.screenshotAt ? ` · ${new Date(agent.screenshotAt).toLocaleTimeString()}` : ''}</div>
+          </div>
+        )}
+      </div>
+
+      <form
+        className="term-input"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!text.trim()) return;
+          const t = text;
+          setText('');
+          void run(() => api.message(agent.id, t));
+        }}
+      >
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={
+            working ? `Tell ${agent.name} something while they work…` : canMessage ? `Ask ${agent.name} for a follow-up (resumes their session)…` : `Assign an issue to get ${agent.name} started`
+          }
+          disabled={!canMessage}
+          autoFocus
+        />
+        <button className="btn" disabled={busy || !canMessage || !text.trim()}>
+          Send
+        </button>
+      </form>
+
+      <div className="term-actions">
+        {working ? (
+          <button className="btn btn-bad" disabled={busy} onClick={() => run(() => api.stop(agent.id))}>
+            ■ Stop
+          </button>
+        ) : (
+          <>
+            <select value={issue} onChange={(e) => setIssue(e.target.value)}>
+              <option value="">{isQa ? 'Pick a pull request to test…' : 'Pick an issue from the backlog…'}</option>
+              {choices.map((c) => (
+                <option key={c.key} value={c.number}>
+                  {isQa ? 'PR ' : ''}#{c.number} {c.title}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn btn-good"
+              disabled={busy || !issue}
+              onClick={() =>
+                run(async () => {
+                  if (isQa) await api.sendToQa(repo.id, Number(issue));
+                  else await api.assign(agent.id, Number(issue));
+                  setIssue('');
+                })
+              }
+            >
+              {isQa ? '🔍 Send to QA' : '▶ Start issue'}
+            </button>
+            {agent.status !== 'idle' && (
+              <button className="btn" disabled={busy} onClick={() => run(() => api.reset(agent.id))}>
+                ↺ Clear desk
+              </button>
+            )}
+          </>
+        )}
+        <span className="spacer" />
+        <button
+          className="btn btn-ghost"
+          disabled={busy}
+          onClick={() => {
+            if (!confirm(`Let ${agent.name} go? Their worktree will be removed (pushed branches stay on GitHub).`)) return;
+            void run(async () => {
+              await api.fireAgent(agent.id);
+              closeOverlay();
+            });
+          }}
+        >
+          Let go
+        </button>
+      </div>
+    </Panel>
+  );
+}
