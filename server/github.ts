@@ -38,16 +38,6 @@ export async function repoMeta(fullName: string): Promise<RepoMeta> {
   };
 }
 
-export async function createRepo(name: string, opts: { description?: string; visibility: 'private' | 'public'; owner?: string }): Promise<string> {
-  const target = opts.owner ? `${opts.owner}/${name}` : name;
-  const args = ['repo', 'create', target, `--${opts.visibility}`, '--add-readme'];
-  if (opts.description) args.push('--description', opts.description);
-  const out = await gh(args, { timeoutMs: 60_000 });
-  // gh prints the new repo URL; normalise to owner/name.
-  const match = out.match(/github\.com\/([^/\s]+\/[^/\s]+)/);
-  return match ? match[1] : target;
-}
-
 export async function listIssues(fullName: string): Promise<IssueInfo[]> {
   const raw = await ghJson<
     { number: number; title: string; body: string; url: string; labels: { name: string }[]; createdAt: string }[]
@@ -112,8 +102,21 @@ export async function listPulls(fullName: string): Promise<PullInfo[]> {
   return [...open, ...merged].map(toPull);
 }
 
-export async function createIssue(fullName: string, title: string, body: string): Promise<number> {
-  const out = await gh(['issue', 'create', '-R', fullName, '--title', title, '--body-file', '-'], { input: body || ' ' });
+// swarm:<specialty> labels route issues to specialists. gh refuses unknown labels, so they're created on first use.
+const labelsMade = new Set<string>();
+
+async function ensureLabel(fullName: string, name: string) {
+  const key = `${fullName}#${name}`;
+  if (labelsMade.has(key)) return;
+  await gh(['label', 'create', name, '-R', fullName, '--color', 'c77dff', '--description', 'Office Swarm: routed to this specialty', '--force']);
+  labelsMade.add(key);
+}
+
+export async function createIssue(fullName: string, title: string, body: string, labels: string[] = []): Promise<number> {
+  for (const l of labels) await ensureLabel(fullName, l);
+  const args = ['issue', 'create', '-R', fullName, '--title', title, '--body-file', '-'];
+  for (const l of labels) args.push('--label', l);
+  const out = await gh(args, { input: body || ' ' });
   const match = out.match(/\/issues\/(\d+)/);
   if (!match) throw new Error(`Could not read the new issue number from gh output: ${out}`);
   return Number(match[1]);

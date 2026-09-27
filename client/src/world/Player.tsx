@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { loadView, saveView, useStore, type Focus } from '../store';
+import { loadView, pendingRequests, saveView, unreadMessages, useStore, type Focus } from '../store';
 import { api } from '../api';
 import { EYE_HEIGHT, SPAWN, collide, type Rect } from './layout';
 import { interactables } from './interact';
@@ -82,6 +82,10 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
       keys.current.add(e.code);
       if (e.code === 'KeyE' && s.focus) runFocusAction(s.focus);
       if (e.code === 'KeyH') s.openOverlay({ kind: 'help' });
+      if (e.code === 'KeyP') {
+        e.preventDefault(); // don't type the "p" into the phone's message box
+        s.openOverlay({ kind: 'phone', tab: pendingRequests(s.requests).length && !unreadMessages(s.messages, s.phoneReadAt) ? 'hires' : 'chat' });
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => keys.current.delete(e.code);
     const onBlur = () => keys.current.clear();

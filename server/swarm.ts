@@ -6,15 +6,22 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, jobLabel, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools } from './ceo.ts';
+import { blockers, issueSpecialty } from '../shared/issues.ts';
+import { CEO_ID } from '../shared/types.ts';
 import type {
   AgentLook,
   AgentRole,
   AgentStatus,
   AgentTask,
   AgentView,
+  CeoInfo,
   EffortLevel,
+  HireRequestView,
   IssueInfo,
   LogLine,
+  PhoneMessage,
+  ProjectFolderView,
   PullInfo,
   QaCheck,
   QaView,
@@ -37,14 +44,22 @@ interface PersistedRepo {
   autoAssign: boolean;
   browserTesting: boolean;
   links: string[]; // other connected repos this floor's agents may read
+  localPath: string | null; // the manager's own project folder (null: a clone under WORKSPACE_ROOT)
+  mission: string;
+  summary: string;
+  qaBrief: string;
   addedAt: number;
 }
 
 interface PersistedAgent {
   id: string;
   name: string;
-  repoId: string;
+  repoId: string; // '' for the CEO, who works in the lobby
   role: AgentRole;
+  title: string;
+  specialty: string;
+  brief: string;
+  hiredBy: 'manager' | 'ceo';
   look: AgentLook;
   task: AgentTask | null;
   desk: number;
@@ -76,11 +91,28 @@ interface QaRecord extends QaView {
   sessionFailures: number;
 }
 
+/** Choices made when a project moves into the office. */
+interface FloorOptions {
+  mission?: string; // brief for the CEO to plan from
+  autoAssign?: boolean; // free developers pick up backlog issues as soon as they're filed
+}
+
+interface CeoState {
+  queue: CeoJob[];
+  job: CeoJob | null; // the job the CEO is on right now
+  lastReviewAt: number | null;
+  lastFingerprint: string | null; // company state at the last review; unchanged means the next review is skipped
+}
+
 interface Persisted {
   settings: SwarmSettings;
   repos: PersistedRepo[];
   agents: PersistedAgent[];
   qa: QaRecord[];
+  requests: HireRequestView[];
+  ceo: CeoState;
+  messages: PhoneMessage[];
+  phoneReadAt: number;
 }
 
 interface Shot {
@@ -145,11 +177,23 @@ const FEMININE_NAMES = new Set(
 );
 const lookFor = (name: string): AgentLook => (FEMININE_NAMES.has(name.trim().split(/\s+/)[0].toLowerCase()) ? 'feminine' : 'masculine');
 const LOOKS: AgentLook[] = ['feminine', 'masculine'];
-const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3 };
+const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1 };
 const MAX_QA_ROUNDS = 3;
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+// The CEO thinks harder than the staff: Opus 5.5 at xhigh effort unless the manager changes it.
+const CEO_MODEL = 'claude-opus-5-5';
+const CEO_EFFORT: EffortLevel = 'xhigh';
+const CEO_NAME = 'Morgan';
+// The CEO's own folder: its notes about the company live here. Repos are read through their clones.
+const CEO_DIR = path.join(HOME_DIR, 'ceo');
+// Your projects most likely live next to this app (e.g. C:\Projects\office-swarm → C:\Projects).
+const DEFAULT_PROJECTS_DIR = path.resolve(import.meta.dirname, '..', '..');
+const MAX_PENDING_REQUESTS = 8;
+const MAX_ISSUES_PER_JOB = 12;
+const KEEP_MESSAGES = 200;
+const KEEP_DECIDED_REQUESTS = 40;
 
 const pick = <T>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
 const slugify = (s: string) =>
@@ -265,11 +309,38 @@ export class HttpError extends Error {
 
 export class Swarm {
   private state: Persisted = {
-    settings: { maxConcurrent: 4, defaultModel: DEFAULT_MODEL, defaultEffort: 'medium', permissionMode: 'guarded' },
+    settings: {
+      maxConcurrent: 4,
+      defaultModel: DEFAULT_MODEL,
+      defaultEffort: 'medium',
+      permissionMode: 'guarded',
+      hiring: 'approve',
+      teamCap: 6,
+      ceoHeartbeatMin: 60,
+      managerName: '',
+      companyName: '',
+      projectsDir: DEFAULT_PROJECTS_DIR,
+      setupDone: false,
+      tutorialStep: 0,
+    },
     repos: [],
     agents: [],
     qa: [],
+    requests: [],
+    ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
+    messages: [],
+    phoneReadAt: 0,
   };
+  private office: OfficeTools = createOfficeTools({
+    companyStatus: () => this.companyStatus(),
+    setFloorProfile: (a) => this.setFloorProfile(a),
+    updateJob: (a) => this.updateJob(a),
+    proposeHire: (a) => this.proposeHire(a),
+    proposeLetGo: (a) => this.proposeLetGo(a),
+    fileIssue: (a) => this.fileIssue(a),
+  });
+  private ceoIssues = { filed: 0, repos: new Set<string>() }; // issues filed during the current CEO job
+  private messageSeq = 1;
   private agentRt = new Map<string, AgentRuntime>();
   private repoRt = new Map<string, RepoRuntime>();
   private clients = new Set<WebSocket>();
@@ -289,21 +360,35 @@ export class Swarm {
       const loaded = JSON.parse(raw) as Partial<Persisted>;
       this.state = {
         settings: { ...this.state.settings, ...loaded.settings },
-        repos: (loaded.repos ?? []).map((r) => ({ ...r, links: r.links ?? [] })),
+        repos: (loaded.repos ?? []).map((r) => ({ ...r, links: r.links ?? [], mission: r.mission ?? '', summary: r.summary ?? '', qaBrief: r.qaBrief ?? '', localPath: r.localPath ?? null })),
         agents: (loaded.agents ?? []).map((a) => ({
           ...a,
           effort: a.effort ?? '',
           role: a.role ?? 'dev',
+          title: a.title ?? '',
+          specialty: a.specialty ?? '',
+          brief: a.brief ?? '',
+          hiredBy: a.hiredBy ?? 'manager',
           look: a.look ?? lookFor(a.name),
           task: a.task ?? (a.issueNumber ? 'issue' : null),
         })),
         qa: loaded.qa ?? [],
+        requests: loaded.requests ?? [],
+        ceo: { ...this.state.ceo, ...loaded.ceo },
+        messages: loaded.messages ?? [],
+        phoneReadAt: loaded.phoneReadAt ?? 0,
       };
+      for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!this.state.settings.defaultModel) this.state.settings.defaultModel = DEFAULT_MODEL;
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
+      // Offices that were set up before the setup wizard existed skip it.
+      if (loaded.settings && loaded.settings.setupDone === undefined && this.state.repos.length > 0) {
+        Object.assign(this.state.settings, { setupDone: true, tutorialStep: -1 });
+      }
     } catch {
       // first run
     }
+    for (const r of this.state.repos) if (r.localPath) this.backend.setLocalPath(r.fullName, r.localPath);
     const interrupted: PersistedAgent[] = [];
     for (const a of this.state.agents) {
       const tail = a.logTail ?? [];
@@ -325,6 +410,8 @@ export class Swarm {
     }
 
     if (this.backend.demo && this.state.repos.length === 0) {
+      // The demo opens on a busy office; the tutorial still runs so it can be tried.
+      Object.assign(this.state.settings, { setupDone: true, managerName: 'Demo Manager', companyName: 'Demo Co.' });
       for (const r of await this.backend.listMyRepos()) {
         const repo = await this.connectRepo(r.nameWithOwner);
         for (let i = 0; i < (repo.floor === 1 ? 5 : 3); i++) this.hireAgent(repo.id, {});
@@ -332,6 +419,7 @@ export class Swarm {
       }
     }
     for (const r of this.state.repos) this.ensureQaTester(r);
+    this.ensureCeo(interrupted);
 
     for (const r of this.state.repos) void this.cloneRepo(r.id);
     await Promise.all(this.state.repos.map((r) => this.syncRepo(r.id)));
@@ -383,6 +471,11 @@ export class Swarm {
       autoAssign: r.autoAssign,
       browserTesting: r.browserTesting,
       links: r.links,
+      mission: r.mission,
+      summary: r.summary,
+      qaBrief: r.qaBrief,
+      localPath: r.localPath,
+      checkoutPath: this.backend.mainDir(r.fullName),
       cloneStatus: rt.cloneStatus,
       cloneError: rt.cloneError,
       issues: rt.issues,
@@ -399,6 +492,10 @@ export class Swarm {
       name: a.name,
       repoId: a.repoId,
       role: a.role,
+      title: a.title,
+      specialty: a.specialty,
+      brief: a.brief,
+      hiredBy: a.hiredBy,
       look: a.look,
       task: a.task,
       desk: a.desk,
@@ -452,6 +549,10 @@ export class Swarm {
       repos: this.state.repos.map((r) => this.repoView(r)),
       agents: this.state.agents.map((a) => this.agentView(a, true)),
       qa: this.state.qa.map((q) => this.qaView(q)),
+      requests: this.state.requests,
+      ceo: this.ceoInfo(),
+      messages: this.state.messages.slice(-100),
+      phoneReadAt: this.state.phoneReadAt,
     };
   }
 
@@ -485,6 +586,8 @@ export class Swarm {
   }
 
   private emitAgent(a: PersistedAgent) {
+    // A session can finish after its agent was let go (their floor disconnected mid-task); they're gone, so say nothing.
+    if (!this.agentRt.has(a.id)) return;
     const { log: _log, ...rest } = this.agentView(a, false);
     this.broadcast({ type: 'agent', agent: rest });
   }
@@ -565,10 +668,15 @@ export class Swarm {
     return this.backend.listMyRepos(owner);
   }
 
-  async connectRepo(fullName: string): Promise<RepoView> {
+  /**
+   * Give a GitHub repo a floor. Its main checkout is one of your own folders: the one you picked, else the folder in
+   * your projects folder that already has it as origin, else a fresh clone into your projects folder.
+   */
+  async connectRepo(fullName: string, opts: FloorOptions & { localPath?: string } = {}): Promise<RepoView> {
     const existing = this.state.repos.find((r) => r.id.toLowerCase() === fullName.toLowerCase());
     if (existing) throw new HttpError(409, `${fullName} is already floor ${existing.floor}`);
     const meta = await this.backend.repoMeta(fullName);
+    const folder = opts.localPath ?? (await this.projectFolderFor(meta.nameWithOwner));
     const floor = this.state.repos.reduce((m, r) => Math.max(m, r.floor), 0) + 1;
     const repo: PersistedRepo = {
       id: meta.nameWithOwner,
@@ -578,11 +686,16 @@ export class Swarm {
       defaultBranch: meta.defaultBranch,
       floor,
       color: FLOOR_COLORS[(floor - 1) % FLOOR_COLORS.length],
-      autoAssign: false,
+      autoAssign: !!opts.autoAssign,
       browserTesting: true,
       links: [],
+      localPath: folder,
+      mission: (opts.mission ?? '').trim().slice(0, 4000),
+      summary: '',
+      qaBrief: '',
       addedAt: Date.now(),
     };
+    this.backend.setLocalPath(repo.fullName, folder);
     this.state.repos.push(repo);
     this.repoRt.set(repo.id, { issues: [], pulls: [], lastSync: null, syncing: false, cloneStatus: 'pending' });
     this.save();
@@ -591,17 +704,71 @@ export class Swarm {
     this.ensureQaTester(repo);
     void this.cloneRepo(repo.id);
     void this.syncRepo(repo.id);
+    // The CEO studies every new floor and proposes the team it needs.
+    this.enqueueCeo({ kind: 'onboard', repoId: repo.id, at: Date.now() });
     return this.repoView(repo);
   }
 
-  async createRepo(name: string, opts: { description?: string; visibility: 'private' | 'public'; owner?: string }) {
-    if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new HttpError(400, 'Repo names may only contain letters, numbers, ".", "-" and "_"');
-    const fullName = await this.backend.createRepo(name, opts);
-    return this.connectRepo(fullName);
+  /** Where a GitHub repo's checkout goes when you connect it without picking a folder. */
+  private async projectFolderFor(fullName: string): Promise<string> {
+    const root = this.state.settings.projectsDir;
+    const folders = await this.backend.scanProjects(root).catch(() => []);
+    const match = folders.find((f) => f.github?.toLowerCase() === fullName.toLowerCase());
+    if (match) return match.path;
+    const name = fullName.split('/')[1];
+    const taken = folders.find((f) => f.name.toLowerCase() === name.toLowerCase());
+    if (taken) throw new HttpError(409, `${taken.path} already exists and isn't a clone of ${fullName}. Connect that folder instead, or rename it first.`);
+    return path.join(root, name); // cloned there when the floor opens
+  }
+
+  /** A brand-new project: a folder in your projects folder, pushed to a new GitHub repo. */
+  async createRepo(name: string, opts: FloorOptions & { description?: string; visibility: 'private' | 'public'; owner?: string }) {
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new HttpError(400, 'Project names may only contain letters, numbers, ".", "-" and "_"');
+    const created = await this.backend.createProject(this.state.settings.projectsDir, name, opts).catch((err: Error) => {
+      throw new HttpError(400, err.message);
+    });
+    return this.connectRepo(created.fullName, { mission: opts.mission, autoAssign: opts.autoAssign, localPath: created.path });
+  }
+
+  /** The folders in your projects folder (or another folder you point at), and which are floors already. */
+  async listProjectFolders(dir?: string): Promise<{ root: string; folders: ProjectFolderView[] }> {
+    const root = dir?.trim() ? path.resolve(dir.trim()) : this.state.settings.projectsDir;
+    const folders = await this.backend.scanProjects(root).catch((err: Error) => {
+      throw new HttpError(400, err.message);
+    });
+    const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+    const floorOf = (f: { path: string; github: string | null }) =>
+      this.state.repos.find((r) => (r.localPath && same(r.localPath, f.path)) || (f.github && r.id.toLowerCase() === f.github.toLowerCase()))?.floor ?? null;
+    return { root, folders: folders.map((f) => ({ name: f.name, path: f.path, git: f.git, github: f.github, floor: floorOf(f) })) };
+  }
+
+  /** Give one of your folders a floor. It must already be on GitHub; otherwise publish it first. */
+  async connectFolder(dir: string, opts: FloorOptions = {}) {
+    const f = await this.backend.inspectFolder(dir).catch((err: Error) => {
+      throw new HttpError(400, err.message);
+    });
+    if (!f.github) throw new HttpError(400, `${f.name} ${f.git ? "isn't on GitHub yet" : "isn't a git repository yet"}. Publish it to GitHub first.`);
+    return this.connectRepo(f.github, { ...opts, localPath: f.path });
+  }
+
+  /** Put one of your folders on GitHub (only what's committed goes up), then give it a floor. */
+  async publishFolder(dir: string, opts: FloorOptions & { name?: string; visibility: 'private' | 'public'; description?: string }) {
+    const f = await this.backend.inspectFolder(dir).catch((err: Error) => {
+      throw new HttpError(400, err.message);
+    });
+    const name = (opts.name?.trim() || f.name).replace(/[^A-Za-z0-9._-]+/g, '-');
+    const fullName = await this.backend.publishFolder(f.path, { name, visibility: opts.visibility, description: opts.description }).catch((err: Error) => {
+      throw new HttpError(400, err.message);
+    });
+    return this.connectRepo(fullName, { mission: opts.mission, autoAssign: opts.autoAssign, localPath: f.path });
   }
 
   disconnectRepo(id: string) {
     const repo = this.repo(id);
+    this.state.ceo.queue = this.state.ceo.queue.filter((j) => j.repoId !== id);
+    for (const r of this.state.requests.filter((x) => x.repoId === id && x.status === 'pending')) {
+      this.decide(r, { status: 'rejected', note: 'The floor was disconnected.', decidedBy: null });
+    }
     for (const a of this.state.agents.filter((x) => x.repoId === id)) this.fireAgent(a.id, true);
     this.state.repos = this.state.repos.filter((r) => r.id !== id);
     for (const q of this.state.qa.filter((x) => x.repoId === id)) this.broadcast({ type: 'qaRemoved', repoId: id, prNumber: q.prNumber });
@@ -610,18 +777,22 @@ export class Swarm {
     this.repoRt.delete(id);
     // Keep floors contiguous.
     this.state.repos.sort((a, b) => a.floor - b.floor).forEach((r, i) => (r.floor = i + 1));
+    this.backend.setLocalPath(repo.fullName, null);
     this.save();
     this.broadcast({ type: 'repoRemoved', repoId: id });
     for (const r of this.state.repos) this.emitRepo(r);
-    this.toast('info', `${repo.fullName} disconnected (files kept in the workspace folder)`);
+    this.toast('info', repo.localPath ? `${repo.fullName} left the building. Your folder ${repo.localPath} is untouched.` : `${repo.fullName} disconnected (its clone stays on disk)`);
   }
 
-  updateRepo(id: string, patch: Partial<Pick<PersistedRepo, 'autoAssign' | 'browserTesting' | 'color' | 'links'>>) {
+  updateRepo(id: string, patch: Partial<Pick<PersistedRepo, 'autoAssign' | 'browserTesting' | 'color' | 'links' | 'mission' | 'summary' | 'qaBrief'>>) {
     const repo = this.repo(id);
     if (patch.autoAssign !== undefined) repo.autoAssign = !!patch.autoAssign;
     if (patch.browserTesting !== undefined) repo.browserTesting = !!patch.browserTesting;
     if (patch.color && /^#[0-9a-f]{6}$/i.test(patch.color)) repo.color = patch.color;
     if (Array.isArray(patch.links)) repo.links = patch.links.filter((l) => l !== id && this.state.repos.some((r) => r.id === l));
+    if (typeof patch.mission === 'string') repo.mission = patch.mission.trim().slice(0, 4000);
+    if (typeof patch.summary === 'string') repo.summary = patch.summary.trim().slice(0, 140);
+    if (typeof patch.qaBrief === 'string') repo.qaBrief = patch.qaBrief.trim().slice(0, 2500);
     this.save();
     this.emitRepo(repo);
     setTimeout(() => this.schedule(), 200);
@@ -695,10 +866,11 @@ export class Swarm {
     this.save();
   }
 
-  async createIssue(repoId: string, title: string, body: string, assignTo?: string) {
+  async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {
     const repo = this.repo(repoId);
     if (!title.trim()) throw new HttpError(400, 'An issue needs a title');
-    const number = await this.backend.createIssue(repo.fullName, title.trim(), body);
+    const slug = specialtySlug(specialty);
+    const number = await this.backend.createIssue(repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : []);
     await this.syncRepo(repo.id);
     this.toast('success', `Issue #${number} filed on ${repo.fullName}`);
     if (assignTo) await this.assign(assignTo, number);
@@ -722,7 +894,21 @@ export class Swarm {
 
   // ---------- agents ----------
 
-  hireAgent(repoId: string, opts: { name?: string; model?: string; effort?: string; role?: string; look?: string }) {
+  hireAgent(
+    repoId: string,
+    opts: {
+      name?: string;
+      model?: string;
+      effort?: string;
+      role?: string;
+      look?: string;
+      title?: string;
+      specialty?: string;
+      brief?: string;
+      hiredBy?: 'manager' | 'ceo';
+      appearance?: { color: string; hair: string; skin: string };
+    },
+  ) {
     const repo = this.repo(repoId);
     const role: AgentRole = opts.role === 'qa' ? 'qa' : 'dev';
     const used = new Set(this.state.agents.filter((a) => a.repoId === repo.id && a.role === role).map((a) => a.desk));
@@ -731,20 +917,22 @@ export class Swarm {
     if (desk >= MAX_DESKS[role]) {
       throw new HttpError(400, role === 'qa' ? `The QA lab on floor ${repo.floor} is full (${MAX_DESKS.qa} stations)` : `Floor ${repo.floor} is full (${MAX_DESKS.dev} desks)`);
     }
-    const taken = new Set(this.state.agents.map((a) => a.name));
-    const pool = role === 'qa' ? QA_NAMES : DEV_NAMES;
-    const name = opts.name?.trim() || pool.find((n) => !taken.has(n)) || `${role === 'qa' ? 'Tester' : 'Agent'} ${this.state.agents.length + 1}`;
+    const name = opts.name?.trim() || this.freeName(role);
     const agent: PersistedAgent = {
       id: crypto.randomUUID(),
       name,
       repoId: repo.id,
       role,
+      title: String(opts.title ?? '').trim().slice(0, 60),
+      specialty: specialtySlug(opts.specialty),
+      brief: String(opts.brief ?? '').trim().slice(0, 2500),
+      hiredBy: opts.hiredBy ?? 'manager',
       look: LOOKS.includes(opts.look as AgentLook) ? (opts.look as AgentLook) : lookFor(name),
       task: null,
       desk,
-      color: pick(SHIRTS),
-      hair: pick(HAIR),
-      skin: pick(SKIN),
+      color: opts.appearance?.color ?? pick(SHIRTS),
+      hair: opts.appearance?.hair ?? pick(HAIR),
+      skin: opts.appearance?.skin ?? pick(SKIN),
       model: opts.model ?? '',
       effort: EFFORTS.includes(opts.effort as EffortLevel) ? (opts.effort as EffortLevel) : '',
       status: 'idle',
@@ -765,6 +953,7 @@ export class Swarm {
     this.agentRt.set(agent.id, { log: [], pending: [], session: null, currentTool: null, browserUrl: null, screenshot: null, shots: [] });
     this.appendLog(agent, [
       { kind: 'system', text: role === 'qa' ? `🔍 ${name} joined the QA lab on floor ${repo.floor} (${repo.fullName}).` : `👋 ${name} joined floor ${repo.floor} (${repo.fullName}).` },
+      ...(agent.title ? [{ kind: 'system' as const, text: `🪪 ${agent.title}${agent.specialty ? ` · takes swarm:${agent.specialty} issues first` : ''}` }] : []),
     ]);
     this.save();
     this.broadcast({ type: 'agent', agent: this.agentView(agent, false) });
@@ -778,24 +967,46 @@ export class Swarm {
     this.hireAgent(repo.id, { role: 'qa' });
   }
 
-  updateAgent(id: string, patch: { name?: string; model?: string; effort?: string; look?: string }) {
+  /** A name from the role's pool that no agent or pending candidate has. */
+  private freeName(role: 'dev' | 'qa') {
+    const taken = new Set([...this.state.agents.map((a) => a.name), ...this.state.requests.filter((r) => r.status === 'pending').map((r) => r.name)]);
+    const pool = role === 'qa' ? QA_NAMES : DEV_NAMES;
+    return pool.find((n) => !taken.has(n)) || `${role === 'qa' ? 'Tester' : 'Agent'} ${this.state.agents.length + 1}`;
+  }
+
+  updateAgent(
+    id: string,
+    patch: { name?: string; model?: string; effort?: string; look?: string; title?: string; specialty?: string; brief?: string; color?: string; hair?: string },
+  ) {
     const a = this.agent(id);
     if (patch.name?.trim() && patch.name.trim() !== a.name) {
       a.name = patch.name.trim().slice(0, 24);
       a.look = lookFor(a.name);
     }
     if (LOOKS.includes(patch.look as AgentLook)) a.look = patch.look as AgentLook;
+    if (patch.color && /^#[0-9a-f]{6}$/i.test(patch.color)) a.color = patch.color;
+    if (patch.hair && /^#[0-9a-f]{6}$/i.test(patch.hair)) a.hair = patch.hair;
     if (patch.model !== undefined) a.model = String(patch.model).trim();
     if (patch.effort !== undefined) a.effort = EFFORTS.includes(patch.effort as EffortLevel) ? (patch.effort as EffortLevel) : '';
+    if (a.role !== 'ceo') {
+      if (patch.title !== undefined) a.title = String(patch.title).trim().slice(0, 60);
+      if (patch.specialty !== undefined) a.specialty = specialtySlug(patch.specialty);
+      if (patch.brief !== undefined) a.brief = String(patch.brief).trim().slice(0, 2500);
+    }
     this.save();
     this.emitAgent(a);
   }
 
   fireAgent(id: string, force = false) {
     const a = this.agent(id);
+    if (a.role === 'ceo') throw new HttpError(409, `${a.name} runs the company and can't be let go.`);
     if (!force && a.role === 'qa' && this.state.agents.filter((x) => x.repoId === a.repoId && x.role === 'qa').length <= 1) {
       throw new HttpError(409, `${a.name} is the only QA tester on this floor, and every floor needs at least one.`);
     }
+    for (const r of this.state.requests.filter((x) => x.kind === 'let-go' && x.agentId === id && x.status === 'pending')) {
+      this.decide(r, { status: 'approved', note: 'They were let go directly.', decidedBy: 'manager' });
+    }
+
     this.agentRt.get(id)?.session?.stop();
     void removeScreens(id);
     for (const q of this.state.qa) {
@@ -856,6 +1067,7 @@ export class Swarm {
     const a = this.agent(agentId);
     const repo = this.repo(a.repoId);
     if (a.role === 'qa') throw new HttpError(400, `${a.name} is a QA tester; they test pull requests rather than issues.`);
+    if (a.role === 'ceo') throw new HttpError(400, `${a.name} runs the company; give issues to the developers.`);
     if (BUSY.includes(a.status)) throw new HttpError(409, `${a.name} is already working on #${a.issueNumber}`);
     this.ensureSlot();
     const issue = this.repoRt.get(repo.id)?.issues.find((i) => i.number === issueNumber);
@@ -878,10 +1090,13 @@ export class Swarm {
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.backend.mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
-      `You are ${a.name}, a software engineer on an autonomous agent team ("Office Swarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
+      `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("Office Swarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
       'Every pull request is tested by a QA teammate before the manager merges it. If they find problems you will receive their report; fix the problems on the same branch.',
+      a.brief ? `\nYour job description:\n${a.brief}` : '',
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
+      repo.summary ? `Project: ${repo.summary}` : '',
+      repo.mission ? `What the team is building (the manager's brief): ${repo.mission}` : '',
       `Your worktree: ${cwd}`,
       fixing
         ? `You are fixing pull request #${fixing.pr}. Its code is checked out on local branch ${branch}; push fixes with: ${push}. Do not open a new pull request.`
@@ -1138,9 +1353,13 @@ export class Swarm {
 
   private buildQaSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, pr: PrDetails) {
     return [
-      `You are ${a.name}, a QA engineer on an autonomous agent team ("Office Swarm"). Developers open pull requests; you independently verify that each one really works before the manager merges it. Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
+      `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("Office Swarm"). Developers open pull requests; you independently verify that each one really works before the manager merges it. Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
+      ...(a.brief ? ['', `Your job description:\n${a.brief}`] : []),
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
+      ...(repo.summary ? [`Project: ${repo.summary}`] : []),
+      ...(repo.mission ? [`What the team is building (the manager's brief): ${repo.mission}`] : []),
+      ...(repo.qaBrief ? [`What to check on this project (from the CEO):\n${repo.qaBrief}`] : []),
       `Pull request #${pr.number} "${pr.title}" from branch ${pr.headRefName}: ${pr.url}`,
       `Your worktree: ${cwd}. It has the pull request's code checked out on local branch ${branch}.`,
       '',
@@ -1366,6 +1585,7 @@ export class Swarm {
 
   async message(id: string, text: string) {
     const a = this.agent(id);
+    if (a.role === 'ceo') return this.messageCeo(text);
     const repo = this.repo(a.repoId);
     if (!text.trim()) throw new HttpError(400, 'Empty message');
     const rt = this.agentRt.get(id)!;
@@ -1393,10 +1613,32 @@ export class Swarm {
     if (patch.defaultModel !== undefined) s.defaultModel = String(patch.defaultModel).trim() || DEFAULT_MODEL;
     if (patch.defaultEffort !== undefined && EFFORTS.includes(patch.defaultEffort)) s.defaultEffort = patch.defaultEffort;
     if (patch.permissionMode === 'guarded' || patch.permissionMode === 'bypass') s.permissionMode = patch.permissionMode;
+    if (patch.hiring === 'approve' || patch.hiring === 'auto') s.hiring = patch.hiring;
+    if (patch.teamCap !== undefined) s.teamCap = Math.max(1, Math.min(15, Math.round(Number(patch.teamCap)) || 1));
+    if (patch.ceoHeartbeatMin !== undefined) s.ceoHeartbeatMin = Math.max(0, Math.min(1440, Math.round(Number(patch.ceoHeartbeatMin)) || 0));
+    if (typeof patch.managerName === 'string') s.managerName = patch.managerName.trim().slice(0, 40);
+    if (typeof patch.companyName === 'string') s.companyName = patch.companyName.trim().slice(0, 60);
+    if (typeof patch.projectsDir === 'string' && patch.projectsDir.trim()) s.projectsDir = path.resolve(patch.projectsDir.trim());
+    if (typeof patch.setupDone === 'boolean') s.setupDone = patch.setupDone;
+    if (patch.tutorialStep !== undefined) s.tutorialStep = Math.max(-1, Math.round(Number(patch.tutorialStep)) || 0);
     this.save();
     this.broadcast({ type: 'settings', settings: s });
+    this.emitCeo();
     setTimeout(() => this.schedule(), 200);
     return s;
+  }
+
+  /** The setup wizard: who you are, the company, and your CEO. */
+  setup(x: { managerName?: string; companyName?: string; hiring?: string; ceoName?: string; ceoLook?: string; ceoColor?: string }) {
+    this.updateSettings({
+      managerName: x.managerName,
+      companyName: x.companyName,
+      ...(x.hiring === 'auto' || x.hiring === 'approve' ? { hiring: x.hiring } : {}),
+    });
+    const ceo = this.ceo();
+    this.updateAgent(ceo.id, { name: x.ceoName, color: x.ceoColor });
+    if (LOOKS.includes(x.ceoLook as AgentLook)) this.updateAgent(ceo.id, { look: x.ceoLook });
+    return this.state.settings;
   }
 
   // ---------- scheduling ----------
@@ -1427,17 +1669,29 @@ export class Swarm {
     return false;
   }
 
-  /** Give a free developer the next backlog issue (auto-assign floors only). Returns true if work started. */
+  /**
+   * Give a free developer the next backlog issue (auto-assign floors only). Returns true if work started.
+   * Issues labelled swarm:<specialty> wait for that specialist when the floor has one; issues that say
+   * "Depends on #N" wait until #N is closed.
+   */
   private startIssueWork(repo: PersistedRepo): boolean {
     const rt = this.repoRt.get(repo.id)!;
     if (!repo.autoAssign) return false;
-    const agent = this.free(repo, 'dev')[0];
-    if (!agent) return false;
-    const next = rt.issues.find((i) => !i.labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l)) && !this.issueTaken(repo, i.number));
-    if (!next) return false;
-    // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
-    void this.assign(agent.id, next.number).catch((err) => console.warn('auto-assign failed', err));
-    return agent.status === 'preparing';
+    const free = this.free(repo, 'dev');
+    if (free.length === 0) return false;
+    const specialties = new Set(this.state.agents.filter((a) => a.repoId === repo.id && a.role === 'dev' && a.specialty).map((a) => a.specialty));
+    const open = new Set(rt.issues.map((i) => i.number));
+    for (const issue of rt.issues) {
+      if (issue.labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l)) || this.issueTaken(repo, issue.number)) continue;
+      if (blockers(issue.body, open).length) continue;
+      const want = issueSpecialty(issue.labels);
+      const agent = want && specialties.has(want) ? free.find((a) => a.specialty === want) : (free.find((a) => !a.specialty) ?? free[0]);
+      if (!agent) continue;
+      // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
+      void this.assign(agent.id, issue.number).catch((err) => console.warn('auto-assign failed', err));
+      return agent.status === 'preparing';
+    }
+    return false;
   }
 
   /**
@@ -1446,6 +1700,9 @@ export class Swarm {
    * so no repo can hog the slots.
    */
   private schedule() {
+    // Management first: the CEO's jobs are short and shape everyone else's work.
+    this.maybeHeartbeat();
+    this.startCeoWork();
     const repos = this.state.repos.filter((r) => {
       const rt = this.repoRt.get(r.id);
       return rt && rt.lastSync != null && rt.cloneStatus !== 'error';
@@ -1463,5 +1720,590 @@ export class Swarm {
         }
       }
     }
+  }
+
+  // ---------- the CEO ----------
+
+  private ceo() {
+    return this.state.agents.find((a) => a.id === CEO_ID)!;
+  }
+
+  /** The company always has a CEO. One cut off by a server restart picks its job back up. */
+  private ensureCeo(interrupted: PersistedAgent[]) {
+    let a = this.state.agents.find((x) => x.id === CEO_ID);
+    if (!a) {
+      a = {
+        id: CEO_ID,
+        name: CEO_NAME,
+        repoId: '',
+        role: 'ceo',
+        title: 'Chief Executive Officer',
+        specialty: '',
+        brief: '',
+        hiredBy: 'manager',
+        look: lookFor(CEO_NAME),
+        task: null,
+        desk: 0,
+        color: '#e63946',
+        hair: '#2b2118',
+        skin: pick(SKIN),
+        model: CEO_MODEL,
+        effort: CEO_EFFORT,
+        status: 'idle',
+        issueNumber: null,
+        issueTitle: null,
+        branch: null,
+        prNumber: null,
+        prUrl: null,
+        startedAt: null,
+        endedAt: null,
+        costUsd: 0,
+        turns: 0,
+        sessionId: null,
+        lastError: null,
+        logTail: [],
+      };
+      this.state.agents.push(a);
+      this.agentRt.set(a.id, { log: [], pending: [], session: null, currentTool: null, browserUrl: null, screenshot: null, shots: [] });
+      this.appendLog(a, [{ kind: 'system', text: `🏛️ ${a.name} moved into the corner office. The CEO studies every floor, shapes its team and plans its work.` }]);
+    }
+    const i = interrupted.indexOf(a);
+    if (i >= 0) {
+      interrupted.splice(i, 1);
+      a.status = 'idle';
+      a.lastError = null;
+      this.appendLog(a, [{ kind: 'system', text: '↺ The office server restarted. Picking the job back up.' }]);
+    }
+    if (this.state.ceo.job) {
+      this.state.ceo.queue.unshift(this.state.ceo.job);
+      this.state.ceo.job = null;
+    }
+    this.state.ceo.lastReviewAt ??= Date.now(); // the first review comes one heartbeat after the office opens
+  }
+
+  private ceoFloor(repoId?: string) {
+    const repo = repoId ? this.state.repos.find((r) => r.id === repoId) : undefined;
+    if (!repo) return null;
+    return { floor: repo.floor, fullName: repo.fullName, clone: this.backend.mainDir(repo.fullName), mission: repo.mission, backlog: this.repoRt.get(repo.id)?.issues.length ?? 0 };
+  }
+
+  private ceoInfo(): CeoInfo {
+    const c = this.state.ceo;
+    const view = (j: CeoJob) => ({ kind: j.kind, label: jobLabel(j, this.ceoFloor(j.repoId)) });
+    const min = this.state.settings.ceoHeartbeatMin;
+    return {
+      queue: c.queue.map(view),
+      job: c.job ? view(c.job) : null,
+      lastReviewAt: c.lastReviewAt,
+      nextReviewAt: min > 0 && c.lastReviewAt ? c.lastReviewAt + min * 60_000 : null,
+    };
+  }
+
+  private emitCeo() {
+    this.broadcast({ type: 'ceo', ceo: this.ceoInfo() });
+  }
+
+  /** Queue a job for the CEO: one onboarding or plan per floor, one review, and chat messages merge into one reply. */
+  private enqueueCeo(job: CeoJob) {
+    const q = this.state.ceo.queue;
+    if (job.kind === 'plan' && q.some((j) => j.kind === 'onboard' && j.repoId === job.repoId)) return; // onboarding plans from the brief too
+    const same = q.findIndex((j) => j.kind === job.kind && (job.kind === 'review' || job.kind === 'chat' || j.repoId === job.repoId));
+    if (same >= 0) q[same] = job.kind === 'chat' ? { ...q[same], text: `${q[same].text}\n${job.text}` } : job;
+    else q.push(job);
+    this.emitCeo();
+    this.save();
+    setTimeout(() => this.schedule(), 150);
+  }
+
+  /** Start the CEO's next job when they're free and a session slot is open. Replies to the manager go first. */
+  private startCeoWork(): void {
+    const a = this.state.agents.find((x) => x.id === CEO_ID);
+    const c = this.state.ceo;
+    if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
+    if (this.running() >= this.state.settings.maxConcurrent) return;
+    const rank: Record<CeoJob['kind'], number> = { chat: 0, onboard: 1, plan: 1, review: 2 };
+    // A floor's jobs wait for its clone and first sync, so the CEO has something to read.
+    const ready = (j: CeoJob) => {
+      const rt = j.repoId ? this.repoRt.get(j.repoId) : undefined;
+      return !rt || rt.cloneStatus === 'error' || (rt.cloneStatus === 'ready' && rt.lastSync != null);
+    };
+    const job = [...c.queue].sort((x, y) => rank[x.kind] - rank[y.kind]).find(ready);
+    if (!job) return;
+    c.queue.splice(c.queue.indexOf(job), 1);
+    const rt = job.repoId ? this.repoRt.get(job.repoId) : undefined;
+    if (job.repoId && (!rt || rt.cloneStatus === 'error')) {
+      const repo = this.state.repos.find((r) => r.id === job.repoId);
+      if (repo) this.postMessage('office', `⚠️ ${a.name} couldn't study floor ${repo.floor}: the repository clone failed (${rt?.cloneError ?? 'unknown error'}).`);
+      this.emitCeo();
+      this.save();
+      return this.startCeoWork();
+    }
+    void this.runCeoJob(a, job);
+  }
+
+  private async runCeoJob(a: PersistedAgent, job: CeoJob) {
+    const rt = this.agentRt.get(a.id)!;
+    const floor = this.ceoFloor(job.repoId);
+    const label = jobLabel(job, floor);
+    this.state.ceo.job = job;
+    Object.assign(a, { status: 'working' as AgentStatus, task: null, issueNumber: null, issueTitle: label, startedAt: Date.now(), endedAt: null, costUsd: 0, turns: 0, lastError: null });
+    this.appendLog(a, [
+      { kind: 'system', text: '' },
+      { kind: 'system', text: `━━━ ${label} ━━━` },
+    ]);
+    if (job.kind === 'chat') this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${job.text}` }]);
+    if (job.kind === 'review') {
+      this.state.ceo.lastReviewAt = Date.now();
+      this.state.ceo.lastFingerprint = this.fingerprint();
+    }
+    this.ceoIssues = { filed: 0, repos: new Set() };
+    this.emitAgent(a);
+    this.emitCeo();
+    this.save();
+    await fs.mkdir(CEO_DIR, { recursive: true }).catch(() => undefined);
+    if (a.status !== 'working') {
+      // stopped before the session started
+      this.state.ceo.job = null;
+      this.emitCeo();
+      return;
+    }
+    const s = this.state.settings;
+    rt.session = this.backend.startSession(
+      {
+        cwd: CEO_DIR,
+        prompt: ceoJobPrompt(job, floor),
+        systemAppend: ceoSystemPrompt({
+          name: a.name,
+          company: s.companyName,
+          manager: s.managerName,
+          notesFile: path.join(CEO_DIR, 'NOTES.md'),
+          maxConcurrent: s.maxConcurrent,
+          teamCap: s.teamCap,
+          hiring: s.hiring,
+        }),
+        model: a.model || CEO_MODEL,
+        effort: a.effort || CEO_EFFORT,
+        browserTesting: false,
+        permissionMode: s.permissionMode,
+        additionalDirectories: this.state.repos.filter((r) => this.repoRt.get(r.id)?.cloneStatus === 'ready').map((r) => this.backend.mainDir(r.fullName)),
+        role: 'ceo',
+        office: this.office,
+        // A chat carries on from the CEO's last session, so "why did you propose that?" has an answer.
+        resumeSessionId: job.kind === 'chat' ? (a.sessionId ?? undefined) : undefined,
+      },
+      {
+        log: (entries) => this.appendLog(a, entries),
+        tool: (name) => {
+          if (rt.currentTool === name) return;
+          rt.currentTool = name;
+          this.emitAgent(a);
+        },
+        sessionId: (id) => {
+          a.sessionId = id;
+        },
+        browserUrl: () => undefined,
+        screenshot: () => undefined,
+        turn: (text) => this.postMessage('ceo', text),
+        finished: (result) => this.onCeoFinished(a, result),
+      },
+      '',
+    );
+  }
+
+  private onCeoFinished(a: PersistedAgent, result: SessionResult) {
+    const rt = this.agentRt.get(a.id);
+    if (!rt) return;
+    rt.session = null;
+    rt.currentTool = null;
+    a.endedAt = Date.now();
+    a.costUsd += result.costUsd;
+    a.turns += result.turns;
+    const job = this.state.ceo.job;
+    this.state.ceo.job = null;
+    if (a.status === 'stopped') {
+      // the manager already logged the stop
+    } else if (!result.ok) {
+      a.status = 'error';
+      a.lastError = result.errors.join('; ') || 'Session failed';
+      this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
+      const what = job ? jobLabel(job, this.ceoFloor(job.repoId)).toLowerCase() : 'working';
+      this.postMessage('office', `⚠️ ${a.name} hit a problem while ${what}: ${a.lastError.slice(0, 240)}`);
+    } else {
+      a.status = 'done';
+      const filed = this.ceoIssues.filed ? ` · ${this.ceoIssues.filed} issue${this.ceoIssues.filed === 1 ? '' : 's'} filed` : '';
+      this.appendLog(a, [{ kind: 'done', text: `✔ Done in ${this.minutes(a)}m · ${a.turns} turns${filed}` }]);
+    }
+    for (const id of this.ceoIssues.repos) void this.syncRepo(id);
+    this.emitAgent(a);
+    this.emitCeo();
+    this.save();
+    setTimeout(() => this.schedule(), 300);
+  }
+
+  /** The manager's phone → the CEO. Injected into a running session, otherwise the CEO picks it up next. */
+  async messageCeo(text: string) {
+    const t = text.trim().slice(0, 4000);
+    if (!t) throw new HttpError(400, 'Empty message');
+    const a = this.ceo();
+    this.postMessage('manager', t);
+    const rt = this.agentRt.get(a.id)!;
+    if (rt.session) {
+      this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${t}` }]);
+      rt.session.send(`Message from the manager (they read your reply on their phone, so keep it short):\n${t}`);
+      return;
+    }
+    this.enqueueCeo({ kind: 'chat', text: t, at: Date.now() });
+  }
+
+  requestReview() {
+    if (this.state.repos.length === 0) throw new HttpError(400, 'Connect a repo first: the CEO needs a floor to review.');
+    this.enqueueCeo({ kind: 'review', at: Date.now() });
+  }
+
+  onboardFloor(repoId: string) {
+    const repo = this.repo(repoId);
+    this.enqueueCeo({ kind: 'onboard', repoId: repo.id, at: Date.now() });
+  }
+
+  /** The manager hands the CEO a brief for a floor; the CEO turns it into issues and a team. */
+  planFloor(repoId: string, mission?: string) {
+    const repo = this.repo(repoId);
+    if (typeof mission === 'string') {
+      repo.mission = mission.trim().slice(0, 4000);
+      this.emitRepo(repo);
+    }
+    if (!repo.mission) throw new HttpError(400, 'Write a brief first: what should this floor build?');
+    this.enqueueCeo({ kind: 'plan', repoId: repo.id, at: Date.now() });
+  }
+
+  /** Everything the heartbeat cares about. When it hasn't changed since the last review, the review is skipped. */
+  private fingerprint() {
+    const data = {
+      repos: this.state.repos.map((r) => {
+        const rt = this.repoRt.get(r.id);
+        return [r.id, r.mission, r.summary, rt?.issues.map((i) => i.number), rt?.pulls.filter((p) => p.state === 'OPEN').map((p) => p.number)];
+      }),
+      agents: this.state.agents.filter((a) => a.role !== 'ceo').map((a) => [a.id, FREE.includes(a.status) ? 'free' : a.status]),
+      qa: this.state.qa.map((q) => [q.repoId, q.prNumber, q.status]),
+      requests: this.state.requests.filter((r) => r.status === 'pending').map((r) => r.id),
+    };
+    return crypto.createHash('sha1').update(JSON.stringify(data)).digest('hex');
+  }
+
+  private maybeHeartbeat() {
+    const min = this.state.settings.ceoHeartbeatMin;
+    const c = this.state.ceo;
+    if (!min || this.state.repos.length === 0 || c.job?.kind === 'review' || c.queue.some((j) => j.kind === 'review')) return;
+    if (Date.now() < (c.lastReviewAt ?? 0) + min * 60_000) return;
+    if (this.fingerprint() === c.lastFingerprint) {
+      c.lastReviewAt = Date.now(); // nothing changed since the last review
+      this.emitCeo();
+      this.save();
+      return;
+    }
+    this.enqueueCeo({ kind: 'review', at: Date.now() });
+  }
+
+  // ---------- the phone ----------
+
+  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string) {
+    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim().slice(0, 6000), at: Date.now(), ...(requestId ? { requestId } : {}) };
+    this.state.messages.push(m);
+    if (this.state.messages.length > KEEP_MESSAGES) this.state.messages.splice(0, this.state.messages.length - KEEP_MESSAGES);
+    this.broadcast({ type: 'message', message: m });
+    this.save();
+    return m;
+  }
+
+  markPhoneRead(at: number) {
+    const t = Math.min(Number(at) || Date.now(), Date.now());
+    if (t <= this.state.phoneReadAt) return;
+    this.state.phoneReadAt = t;
+    this.broadcast({ type: 'phoneRead', at: t });
+    this.save();
+  }
+
+  // ---------- hire and let-go proposals ----------
+
+  private addRequest(req: HireRequestView) {
+    this.state.requests.push(req);
+    const decided = this.state.requests.filter((r) => r.status !== 'pending');
+    if (decided.length > KEEP_DECIDED_REQUESTS) {
+      const drop = new Set(decided.slice(0, decided.length - KEEP_DECIDED_REQUESTS));
+      this.state.requests = this.state.requests.filter((r) => !drop.has(r));
+    }
+    this.broadcast({ type: 'request', request: req });
+    this.save();
+  }
+
+  private decide(req: HireRequestView, patch: Pick<HireRequestView, 'status' | 'note' | 'decidedBy'>) {
+    Object.assign(req, patch, { decidedAt: Date.now() });
+    this.broadcast({ type: 'request', request: req });
+    this.save();
+  }
+
+  approveRequest(id: string, overrides: { name?: string; model?: string; effort?: string } = {}, by: 'manager' | 'auto' = 'manager') {
+    const req = this.state.requests.find((r) => r.id === id);
+    if (!req) throw new HttpError(404, 'That proposal no longer exists');
+    if (req.status !== 'pending') throw new HttpError(409, `That proposal was already ${req.status}`);
+    const repo = this.repo(req.repoId);
+    if (req.kind === 'hire') {
+      const name = overrides.name?.trim() || req.name;
+      const agent = this.hireAgent(repo.id, {
+        name,
+        role: req.role,
+        model: overrides.model ?? req.model,
+        effort: overrides.effort ?? req.effort,
+        look: name === req.name ? req.look : undefined,
+        title: req.title,
+        specialty: req.specialty,
+        brief: req.brief,
+        hiredBy: 'ceo',
+        appearance: { color: req.color, hair: req.hair, skin: req.skin },
+      });
+      req.agentId = agent.id;
+      req.name = agent.name;
+      this.decide(req, { status: 'approved', note: '', decidedBy: by });
+      this.postMessage(
+        'office',
+        by === 'auto' ? `🤖 Auto-approved: ${agent.name} joined floor ${repo.floor} as ${req.title}.` : `✅ You hired ${agent.name} as ${req.title} on floor ${repo.floor}.`,
+        req.id,
+      );
+      this.toast('success', `${agent.name} (${req.title}) joined floor ${repo.floor}`);
+      return;
+    }
+    const a = req.agentId ? this.state.agents.find((x) => x.id === req.agentId) : undefined;
+    this.decide(req, { status: 'approved', note: a ? '' : 'They had already left.', decidedBy: by });
+    if (a) {
+      try {
+        this.fireAgent(a.id);
+      } catch (err) {
+        this.decide(req, { status: 'pending', note: '', decidedBy: null });
+        throw err;
+      }
+    }
+    this.postMessage('office', `👋 ${req.name} left floor ${repo.floor}${by === 'auto' ? ' (auto-approved)' : ''}.`, req.id);
+  }
+
+  rejectRequest(id: string, note = '') {
+    const req = this.state.requests.find((r) => r.id === id);
+    if (!req) throw new HttpError(404, 'That proposal no longer exists');
+    if (req.status !== 'pending') throw new HttpError(409, `That proposal was already ${req.status}`);
+    this.decide(req, { status: 'rejected', note: note.trim().slice(0, 400), decidedBy: 'manager' });
+    const what = req.kind === 'hire' ? `${req.name} (${req.title})` : `letting ${req.name} go`;
+    this.postMessage('office', `✋ You declined ${what}${req.note ? `: "${req.note}"` : '.'}`, req.id);
+  }
+
+  // ---------- the CEO's office tools ----------
+
+  private floorRepo(floor: number) {
+    const r = this.state.repos.find((x) => x.floor === Number(floor));
+    if (!r) throw new Error(`There is no floor ${floor}. Floors: ${this.state.repos.map((x) => `${x.floor} (${x.fullName})`).join(', ') || 'none'}.`);
+    return r;
+  }
+
+  private agentByRef(ref: string) {
+    const r = String(ref ?? '').trim().toLowerCase();
+    const a = this.state.agents.find((x) => x.id === ref || x.name.toLowerCase() === r);
+    if (!a) throw new Error(`No agent "${ref}". Use the ids from company_status.`);
+    return a;
+  }
+
+  private companyStatus() {
+    const s = this.state.settings;
+    const doing = (a: PersistedAgent) =>
+      !BUSY.includes(a.status) ? null : a.task === 'qa' ? `testing PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : `issue #${a.issueNumber}`;
+    const floors = [...this.state.repos]
+      .sort((x, y) => x.floor - y.floor)
+      .map((r) => {
+        const rt = this.repoRt.get(r.id)!;
+        const open = new Set(rt.issues.map((i) => i.number));
+        return {
+          floor: r.floor,
+          repo: r.fullName,
+          description: r.description,
+          clone: rt.cloneStatus === 'ready' ? this.backend.mainDir(r.fullName) : `(not available: clone ${rt.cloneStatus})`,
+          brief: r.mission || null,
+          profile: r.summary || null,
+          qaBrief: r.qaBrief || null,
+          autoAssign: r.autoAssign,
+          team: this.state.agents
+            .filter((a) => a.repoId === r.id)
+            .map((a) => ({
+              id: a.id,
+              name: a.name,
+              role: a.role,
+              title: a.title || (a.role === 'qa' ? 'QA tester' : 'Developer'),
+              specialty: a.specialty || null,
+              status: a.status,
+              doing: doing(a),
+              hiredBy: a.hiredBy,
+              jobDescription: a.brief ? a.brief.slice(0, 400) : null,
+            })),
+          backlog: rt.issues.map((i) => ({
+            number: i.number,
+            title: i.title,
+            specialty: issueSpecialty(i.labels) || null,
+            waitsFor: blockers(i.body, open),
+            inProgress: this.issueTaken(r, i.number),
+          })),
+          pullRequests: rt.pulls
+            .filter((p) => p.state === 'OPEN')
+            .map((p) => {
+              const q = this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number);
+              return { number: p.number, title: p.title, qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested' };
+            }),
+          mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').map((p) => `#${p.number} ${p.title}`),
+        };
+      });
+    const req = (r: HireRequestView) => ({
+      id: r.id,
+      kind: r.kind,
+      floor: this.state.repos.find((x) => x.id === r.repoId)?.floor ?? null,
+      role: r.role,
+      name: r.name,
+      title: r.title,
+      specialty: r.specialty || null,
+      reason: r.reason,
+      status: r.status,
+      managerNote: r.note || null,
+    });
+    return JSON.stringify(
+      {
+        company: {
+          ceo: this.ceo().name,
+          hiring: s.hiring === 'auto' ? `auto-approved while a floor has fewer than ${s.teamCap} people` : 'the manager approves every proposal',
+          teamCap: s.teamCap,
+          maxConcurrentSessions: s.maxConcurrent,
+          sessionsRunning: this.running(),
+          deskLimits: { dev: MAX_DESKS.dev, qa: MAX_DESKS.qa },
+        },
+        floors,
+        pendingProposals: this.state.requests.filter((r) => r.status === 'pending').map(req),
+        recentDecisions: this.state.requests.filter((r) => r.status !== 'pending').slice(-10).map(req),
+      },
+      null,
+      1,
+    );
+  }
+
+  private setFloorProfile(x: { floor: number; summary?: string; qa_brief?: string }) {
+    const r = this.floorRepo(x.floor);
+    if (x.summary !== undefined) r.summary = String(x.summary).trim().slice(0, 140);
+    if (x.qa_brief !== undefined) r.qaBrief = String(x.qa_brief).trim().slice(0, 2500);
+    this.emitRepo(r);
+    this.save();
+    return `Saved floor ${r.floor}'s profile.`;
+  }
+
+  private updateJob(x: { agent_id: string; title?: string; specialty?: string; job_description?: string }) {
+    const a = this.agentByRef(x.agent_id);
+    if (a.role === 'ceo') throw new Error("That's you.");
+    this.updateAgent(a.id, { title: x.title, specialty: x.specialty, brief: x.job_description });
+    const title = a.title || (a.role === 'qa' ? 'QA tester' : 'Developer');
+    this.appendLog(a, [{ kind: 'system', text: `🪪 ${this.ceo().name} updated ${a.name}'s job: ${title}${a.specialty ? ` · swarm:${a.specialty}` : ''}` }]);
+    return `Updated ${a.name}: ${title}${a.specialty ? ` (specialty ${a.specialty})` : ''}.`;
+  }
+
+  private proposeHire(x: { floor: number; role: 'dev' | 'qa'; title: string; specialty: string; job_description: string; reason: string; model?: string; effort?: string }) {
+    const repo = this.floorRepo(x.floor);
+    const role = x.role === 'qa' ? 'qa' : 'dev';
+    const title = String(x.title ?? '').trim().slice(0, 60);
+    if (!title) throw new Error('A hire needs a job title.');
+    const specialty = specialtySlug(x.specialty);
+    const pending = this.state.requests.filter((r) => r.status === 'pending');
+    if (pending.length >= MAX_PENDING_REQUESTS) throw new Error(`${pending.length} proposals are already waiting for the manager. Wait for their decisions first.`);
+    const dup = pending.find((r) => r.kind === 'hire' && r.repoId === repo.id && r.role === role && r.specialty === specialty);
+    if (dup) throw new Error(`${dup.name} (${dup.title}) is already proposed for floor ${repo.floor} with that specialty.`);
+    const seated = this.state.agents.filter((a) => a.repoId === repo.id && a.role === role).length;
+    const waiting = pending.filter((r) => r.kind === 'hire' && r.repoId === repo.id && r.role === role).length;
+    if (seated + waiting >= MAX_DESKS[role]) throw new Error(role === 'qa' ? `The QA lab on floor ${repo.floor} is full.` : `Floor ${repo.floor} has no free desks.`);
+    const name = this.freeName(role);
+    const req: HireRequestView = {
+      id: crypto.randomUUID(),
+      kind: 'hire',
+      repoId: repo.id,
+      role,
+      agentId: null,
+      name,
+      title,
+      specialty,
+      brief: String(x.job_description ?? '').trim().slice(0, 2500),
+      reason: String(x.reason ?? '').trim().slice(0, 600),
+      model: String(x.model ?? '').trim(),
+      effort: EFFORTS.includes(x.effort as EffortLevel) ? (x.effort as EffortLevel) : '',
+      look: lookFor(name),
+      color: pick(SHIRTS),
+      hair: pick(HAIR),
+      skin: pick(SKIN),
+      status: 'pending',
+      note: '',
+      createdAt: Date.now(),
+      decidedAt: null,
+      decidedBy: null,
+    };
+    this.addRequest(req);
+    const s = this.state.settings;
+    if (s.hiring === 'auto' && this.state.agents.filter((a) => a.repoId === repo.id).length < s.teamCap) {
+      this.approveRequest(req.id, {}, 'auto');
+      return `Hired ${req.name} as ${title} on floor ${repo.floor} (auto-approved; agent id ${req.agentId}).`;
+    }
+    this.postMessage('ceo', `📄 New candidate for floor ${repo.floor}: ${name}, ${title}. ${req.reason}`, req.id);
+    return `Proposed ${name} as ${title} on floor ${repo.floor}. The manager will approve or decline (request ${req.id}).`;
+  }
+
+  private proposeLetGo(x: { agent_id: string; reason: string }) {
+    const a = this.agentByRef(x.agent_id);
+    if (a.role === 'ceo') throw new Error("You can't let yourself go.");
+    const repo = this.repo(a.repoId);
+    if (a.role === 'qa' && this.state.agents.filter((y) => y.repoId === repo.id && y.role === 'qa').length <= 1) {
+      throw new Error(`${a.name} is floor ${repo.floor}'s only QA tester, and every floor keeps one.`);
+    }
+    const pending = this.state.requests.filter((r) => r.status === 'pending');
+    if (pending.some((r) => r.kind === 'let-go' && r.agentId === a.id)) throw new Error(`Letting ${a.name} go is already proposed.`);
+    if (pending.length >= MAX_PENDING_REQUESTS) throw new Error(`${pending.length} proposals are already waiting for the manager. Wait for their decisions first.`);
+    const req: HireRequestView = {
+      id: crypto.randomUUID(),
+      kind: 'let-go',
+      repoId: repo.id,
+      role: a.role,
+      agentId: a.id,
+      name: a.name,
+      title: a.title || (a.role === 'qa' ? 'QA tester' : 'Developer'),
+      specialty: a.specialty,
+      brief: a.brief,
+      reason: String(x.reason ?? '').trim().slice(0, 600),
+      model: a.model,
+      effort: a.effort,
+      look: a.look,
+      color: a.color,
+      hair: a.hair,
+      skin: a.skin,
+      status: 'pending',
+      note: '',
+      createdAt: Date.now(),
+      decidedAt: null,
+      decidedBy: null,
+    };
+    this.addRequest(req);
+    if (this.state.settings.hiring === 'auto' && FREE.includes(a.status)) {
+      this.approveRequest(req.id, {}, 'auto');
+      return `Let ${a.name} go (auto-approved).`;
+    }
+    this.postMessage('ceo', `👋 I suggest letting ${a.name} (${req.title}, floor ${repo.floor}) go. ${req.reason}`, req.id);
+    return `Proposed letting ${a.name} go. The manager will decide (request ${req.id}).`;
+  }
+
+  private async fileIssue(x: { floor: number; title: string; body: string; specialty?: string }) {
+    const repo = this.floorRepo(x.floor);
+    if (this.ceoIssues.filed >= MAX_ISSUES_PER_JOB) throw new Error(`You already filed ${MAX_ISSUES_PER_JOB} issues in this job. That's plenty for one milestone.`);
+    const title = String(x.title ?? '').trim().slice(0, 120);
+    if (!title) throw new Error('An issue needs a title.');
+    const slug = specialtySlug(x.specialty);
+    const body = `${String(x.body ?? '').trim()}\n\n---\n_Filed by ${this.ceo().name}, the Office Swarm CEO._`;
+    const n = await this.backend.createIssue(repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
+    this.ceoIssues.filed++;
+    this.ceoIssues.repos.add(repo.id);
+    return `Filed #${n} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
   }
 }

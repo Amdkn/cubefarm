@@ -1,5 +1,7 @@
-import { useStore } from '../store';
+import { usePhoneBadge, useStore } from '../store';
 import { requestLook } from '../world/Player';
+import { CEO_ID } from '../../../shared/types';
+import { SetupWizard } from './SetupWizard';
 
 export function StartScreen() {
   const started = useStore((s) => s.started);
@@ -8,38 +10,38 @@ export function StartScreen() {
   const demo = useStore((s) => s.demo);
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
+  const settings = useStore((s) => s.settings);
   const start = useStore((s) => s.start);
+  const waiting = usePhoneBadge();
   if (started) return null;
+  if (loaded && !settings.setupDone) return <SetupWizard />;
 
   const enter = () => {
     start();
     requestLook();
   };
+  const ceo = agents[CEO_ID];
+  const staff = Object.values(agents).filter((a) => a.role !== 'ceo').length;
 
   return (
     <div className="start">
       <div className="start-card">
         <div className="start-logo">✻</div>
-        <h1>Office Swarm</h1>
-        <p className="start-tag">A cartoon office where a team of Claude Code agents works through your GitHub issues.</p>
+        <h1>{settings.companyName || 'Office Swarm'}</h1>
+        <p className="start-tag">{settings.managerName ? `Welcome back, ${settings.managerName}.` : 'A cartoon office where a team of Claude Code agents works through your GitHub issues.'}</p>
         <ul className="start-list">
-          <li>🏢 Every connected repo is a floor. Ride the elevator between them.</li>
-          <li>💻 Walk up behind an agent to watch their terminal, or press <kbd>E</kbd> to open it.</li>
-          <li>🔍 QA testers in the lab test every pull request and post the evidence on the PR before you merge.</li>
-          <li>📋 The whiteboard on each floor is the Kanban: backlog → in progress → in QA → ready to merge.</li>
-          <li>🧑‍💼 The manager's office in the lobby is where you connect repos, hire agents and file issues.</li>
+          <li>
+            🏢 {repos.length} project{repos.length === 1 ? '' : 's'}, {staff} {staff === 1 ? 'person' : 'people'} on staff{ceo ? `, and ${ceo.name} in the corner office` : ''}.
+          </li>
+          <li>{waiting ? `📱 ${waiting} thing${waiting === 1 ? '' : 's'} waiting on your phone. Press P once you're in.` : '📱 Press P anywhere for your phone.'}</li>
+          <li>
+            💻 Walk up behind anyone to watch their screen, or press <kbd>E</kbd> on things to use them. <kbd>H</kbd> for help.
+          </li>
         </ul>
         <button className="btn btn-big" onClick={enter} disabled={!loaded}>
           {loaded ? 'Enter the office' : connected ? 'Loading…' : 'Connecting to the swarm server…'}
         </button>
-        <div className="start-meta">
-          {demo && <span className="pill pill-demo">DEMO MODE: fake repos, fake agents</span>}
-          {loaded && (
-            <span>
-              {repos.length} floor{repos.length === 1 ? '' : 's'} · {Object.keys(agents).length} agents
-            </span>
-          )}
-        </div>
+        <div className="start-meta">{demo && <span className="pill pill-demo">DEMO MODE: fake repos, fake agents</span>}</div>
       </div>
     </div>
   );

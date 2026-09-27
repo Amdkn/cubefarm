@@ -1,5 +1,26 @@
 import { useMemo } from 'react';
-import { repoOnFloor, useStore } from '../store';
+import { repoOnFloor, usePhoneBadge, useStore } from '../store';
+import { CEO_ID } from '../../../shared/types';
+
+/** The phone in your pocket: always one key (or click) away, with a badge when the CEO is waiting on you. */
+function PhoneButton() {
+  const badge = usePhoneBadge();
+  const started = useStore((s) => s.started);
+  const overlay = useStore((s) => s.overlay);
+  const openOverlay = useStore((s) => s.openOverlay);
+  const ceo = useStore((s) => s.agents[CEO_ID]);
+  if (!started || overlay?.kind === 'phone') return null;
+  const busy = ceo?.status === 'working';
+  return (
+    <button className={`phone-btn ${badge ? 'phone-btn-ring' : ''}`} onClick={() => openOverlay({ kind: 'phone' })} title="Your phone (P)">
+      <span className="phone-btn-icon">📱</span>
+      {badge > 0 && <span className="badge phone-btn-badge">{badge}</span>}
+      <span className="phone-btn-label">
+        <kbd>P</kbd> {badge ? `${badge} waiting` : busy ? `${ceo.name} is working` : 'Phone'}
+      </span>
+    </button>
+  );
+}
 
 export function HUD() {
   const floor = useStore((s) => s.floor);
@@ -30,7 +51,7 @@ export function HUD() {
       <div className="hud-floor" style={{ ['--accent' as string]: repo?.color ?? '#ff8a5b' }}>
         <div className="floor-num">{repo ? repo.floor : 'G'}</div>
         <div>
-          <div className="floor-name">{repo ? repo.fullName : "Lobby & manager's office"}</div>
+          <div className="floor-name">{repo ? repo.fullName : `${settings.companyName || 'Office Swarm'} · Lobby`}</div>
           <div className="floor-sub">
             {repo
               ? `${floorAgents.length} agents · ${floorAgents.filter((a) => a.status === 'working' || a.status === 'preparing').length} working · ${floorQa.filter((q) => q.status !== 'passed').length} in QA · ${floorQa.filter((q) => q.status === 'passed').length} ready to merge`
@@ -57,9 +78,9 @@ export function HUD() {
         </div>
       )}
       {started && !overlay && !locked && !travel && <div className="hud-resume">Click to look around</div>}
-      {started && (
+      {started && !(settings.setupDone && settings.tutorialStep >= 0) && (
         <div className="hud-help">
-          <kbd>WASD</kbd> move · <kbd>Shift</kbd> run · <kbd>E</kbd> interact · <kbd>H</kbd> help · <kbd>Esc</kbd> free mouse
+          <kbd>WASD</kbd> move · <kbd>Shift</kbd> run · <kbd>E</kbd> interact · <kbd>P</kbd> phone · <kbd>H</kbd> help · <kbd>Esc</kbd> free mouse
         </div>
       )}
 
@@ -67,6 +88,7 @@ export function HUD() {
         {travel && <div className="fade-label">{travel.to === 0 ? 'Lobby' : `Floor ${travel.to}`}</div>}
       </div>
 
+      <PhoneButton />
       <div className="toasts">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.level}`} onClick={() => dismiss(t.id)}>

@@ -9,10 +9,9 @@ export interface Backend {
   user(): Promise<string>;
   listMyRepos(owner?: string): Promise<GhRepoSummary[]>;
   repoMeta(fullName: string): Promise<github.RepoMeta>;
-  createRepo(name: string, opts: { description?: string; visibility: 'private' | 'public'; owner?: string }): Promise<string>;
   listIssues(fullName: string): Promise<IssueInfo[]>;
   listPulls(fullName: string): Promise<PullInfo[]>;
-  createIssue(fullName: string, title: string, body: string): Promise<number>;
+  createIssue(fullName: string, title: string, body: string, labels?: string[]): Promise<number>;
   mergePull(fullName: string, number: number, method: 'squash' | 'merge' | 'rebase'): Promise<void>;
   closePull(fullName: string, number: number): Promise<void>;
   prForBranch(fullName: string, branch: string): Promise<{ number: number; url: string } | null>;
@@ -21,6 +20,12 @@ export interface Backend {
   commentPull(fullName: string, number: number, body: string): Promise<string>;
   uploadEvidence(fullName: string, filePath: string, data: Buffer): Promise<string>;
   ensureClone(fullName: string): Promise<void>;
+  /** Point a floor at the user's own project folder (null: a clone the office manages). */
+  setLocalPath(fullName: string, dir: string | null): void;
+  scanProjects(root: string): Promise<workspace.LocalFolder[]>;
+  inspectFolder(dir: string): Promise<workspace.LocalFolder>;
+  publishFolder(dir: string, opts: { name: string; visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<string>;
+  createProject(root: string, name: string, opts: { visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<{ fullName: string; path: string }>;
   mainDir(fullName: string): string;
   deskDir(fullName: string, agentSlug: string): string;
   prepareDesk(fullName: string, base: workspace.DeskBase, agentSlug: string, branch: string): Promise<string>;
@@ -35,7 +40,6 @@ export const realBackend: Backend = {
   user: github.currentUser,
   listMyRepos: github.listMyRepos,
   repoMeta: github.repoMeta,
-  createRepo: github.createRepo,
   listIssues: github.listIssues,
   listPulls: github.listPulls,
   createIssue: github.createIssue,
@@ -47,6 +51,11 @@ export const realBackend: Backend = {
   commentPull: github.commentPull,
   uploadEvidence: github.uploadEvidence,
   ensureClone: workspace.ensureClone,
+  setLocalPath: workspace.setLocalPath,
+  scanProjects: workspace.scanProjects,
+  inspectFolder: workspace.inspectFolder,
+  publishFolder: workspace.publishFolder,
+  createProject: workspace.createProject,
   mainDir: workspace.mainDir,
   deskDir: workspace.deskDir,
   prepareDesk: workspace.prepareDesk,

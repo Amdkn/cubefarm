@@ -94,10 +94,12 @@ export function Character({ agent }: { agent: Agent }) {
 
   const skin = toon(agent.skin);
   const isQa = agent.role === 'qa';
+  const isCeo = agent.role === 'ceo';
   const feminine = agent.look === 'feminine';
-  const hairStyle = [0, 0, 1, 2][parseInt(agent.id.slice(-2), 16) % 4]; // 0 long (most common), 1 ponytail, 2 bun
+  const hairStyle = [0, 0, 1, 2][(parseInt(agent.id.slice(-2), 16) || 0) % 4]; // 0 long (most common), 1 ponytail, 2 bun
   // QA testers wear a white lab coat; their personal colour shows on the collar and badge.
-  const shirt = toon(isQa ? '#f8f9fa' : agent.color);
+  // The CEO wears a navy suit; their colour is the tie.
+  const shirt = toon(isQa ? '#f8f9fa' : isCeo ? '#2b2d42' : agent.color);
   const pants = toon('#3d4a6b');
   const hair = toon(agent.hair);
   const dark = toon('#1f1d2b');
@@ -127,9 +129,23 @@ export function Character({ agent }: { agent: Agent }) {
           <Outlines thickness={0.015} color={INK} />
         </mesh>
         {/* collar */}
-        <mesh position={[0, 0.5, -0.02]} rotation={[Math.PI / 2, 0, 0]} material={toon(shade(agent.color, -0.15))}>
+        <mesh position={[0, 0.5, -0.02]} rotation={[Math.PI / 2, 0, 0]} material={toon(isCeo ? '#f8f9fa' : shade(agent.color, -0.15))}>
           <torusGeometry args={[0.1, 0.03, 8, 20]} />
         </mesh>
+        {isCeo && (
+          <>
+            {/* white shirt front, tie and knot */}
+            <mesh position={[0, 0.36, -0.192]} material={toon('#f8f9fa')}>
+              <boxGeometry args={[0.11, 0.22, 0.02]} />
+            </mesh>
+            <mesh position={[0, 0.33, -0.206]} material={toon(agent.color)}>
+              <boxGeometry args={[0.045, 0.2, 0.012]} />
+            </mesh>
+            <mesh position={[0, 0.445, -0.206]} material={toon(shade(agent.color, -0.2))}>
+              <boxGeometry args={[0.06, 0.04, 0.02]} />
+            </mesh>
+          </>
+        )}
         {isQa && (
           <>
             {/* lab coat front opening + badge */}

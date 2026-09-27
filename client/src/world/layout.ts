@@ -84,6 +84,12 @@ export function officeColliders(): Rect[] {
 export const MANAGER_ROOM = { minX: -HALF_W, maxX: -6.5, minZ: -HALF_D, maxZ: -3.5, doorMinX: -11, doorMaxX: -9.2 };
 export const MANAGER_DESK = { x: -11.2, z: -8.6, w: 2.6, d: 1.1 };
 export const RECEPTION = { x: 3, z: -3.5, w: 5, d: 1.2 };
+// The CEO's corner office mirrors the manager's across the lobby; the trophy cabinet ends up behind their desk.
+export const CEO_ROOM = { minX: 6.5, maxX: HALF_W, minZ: -HALF_D, maxZ: -3.5, doorMinX: 8.2, doorMaxX: 10 };
+export const CEO_DESK = { x: 12, z: -7.4 };
+// Candidates the CEO wants to hire wait on a row of chairs along the east wall, facing into the lobby.
+export const WAITING = { x: HALF_W - 1.4, seats: [6.6, 7.9, 9.2, 10.4] };
+export const WAITING_ROTATION = Math.PI / 2;
 
 export function lobbyColliders(): Rect[] {
   const out = shellColliders();
@@ -92,6 +98,13 @@ export function lobbyColliders(): Rect[] {
   out.push({ minX: m.maxX - t, maxX: m.maxX + t, minZ: m.minZ, maxZ: m.maxZ }); // glass east wall
   out.push({ minX: m.minX, maxX: m.doorMinX, minZ: m.maxZ - t, maxZ: m.maxZ + t }); // glass south wall, west of door
   out.push({ minX: m.doorMaxX, maxX: m.maxX, minZ: m.maxZ - t, maxZ: m.maxZ + t }); // east of door
+  const c = CEO_ROOM;
+  out.push({ minX: c.minX - t, maxX: c.minX + t, minZ: c.minZ, maxZ: c.maxZ }); // CEO glass west wall
+  out.push({ minX: c.minX, maxX: c.doorMinX, minZ: c.maxZ - t, maxZ: c.maxZ + t }); // south wall, west of door
+  out.push({ minX: c.doorMaxX, maxX: c.maxX, minZ: c.maxZ - t, maxZ: c.maxZ + t }); // east of door
+  out.push(rect(CEO_DESK.x, CEO_DESK.z, DESK.w + 0.1, DESK.d + 0.1));
+  out.push(rect(CEO_DESK.x, CEO_DESK.z + 0.8, 0.7, 0.6)); // CEO chair
+  for (const z of WAITING.seats) out.push(rect(WAITING.x, z, 0.7, 0.7));
   out.push(rect(MANAGER_DESK.x, MANAGER_DESK.z, MANAGER_DESK.w, MANAGER_DESK.d));
   out.push(rect(MANAGER_DESK.x, MANAGER_DESK.z - 1.1, 0.8, 0.8)); // manager chair
   out.push(rect(-HALF_W + 0.4, -8, 0.8, 5)); // bookshelf

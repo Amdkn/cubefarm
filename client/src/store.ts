@@ -1,16 +1,21 @@
 import { create } from 'zustand';
-import type { AgentView, LogLine, QaView, RepoView, ServerEvent, SwarmSettings, WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type CeoInfo, type HireRequestView, type LogLine, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type WorldSnapshot } from '../../shared/types';
+import { blockers } from '../../shared/issues';
+import { chirp } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
+
+export type PhoneTab = 'chat' | 'hires' | 'company';
 
 export type Overlay =
   | { kind: 'terminal'; agentId: string }
   | { kind: 'kanban'; repoId: string }
   | { kind: 'elevator' }
   | { kind: 'manager'; tab?: ManagerTab; repoId?: string }
+  | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
-export type ManagerTab = 'floors' | 'team' | 'issues' | 'settings';
+export type ManagerTab = 'floors' | 'ceo' | 'team' | 'issues' | 'settings';
 
 export interface Focus {
   id: string;
@@ -38,6 +43,10 @@ interface State {
   logs: Record<string, LogLine[]>;
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
+  requests: HireRequestView[];
+  ceo: CeoInfo;
+  messages: PhoneMessage[];
+  phoneReadAt: number;
 
   floor: number; // 0 = lobby
   travel: { to: number; phase: 'closing' | 'opening' } | null;
@@ -96,12 +105,30 @@ export const useStore = create<State>((set, get) => ({
   ghReady: true,
   demo: false,
   workspaceRoot: '',
-  settings: { maxConcurrent: 4, defaultModel: 'claude-opus-5-5', defaultEffort: 'medium', permissionMode: 'guarded' },
+  // Until the server's snapshot arrives; setupDone stays true so the wizard doesn't flash while loading.
+  settings: {
+    maxConcurrent: 4,
+    defaultModel: 'claude-opus-5-5',
+    defaultEffort: 'medium',
+    permissionMode: 'guarded',
+    hiring: 'approve',
+    teamCap: 6,
+    ceoHeartbeatMin: 60,
+    managerName: '',
+    companyName: '',
+    projectsDir: '',
+    setupDone: true,
+    tutorialStep: -1,
+  },
   repos: [],
   agents: {},
   logs: {},
   screens: {},
   qa: {},
+  requests: [],
+  ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
+  messages: [],
+  phoneReadAt: 0,
 
   floor: loadView()?.floor ?? 0,
   travel: null,
@@ -140,6 +167,10 @@ export const useStore = create<State>((set, get) => ({
           logs,
           screens,
           qa,
+          requests: d.requests,
+          ceo: d.ceo,
+          messages: d.messages,
+          phoneReadAt: d.phoneReadAt,
           floor: floorExists ? get().floor : 0,
         });
         break;
@@ -188,6 +219,30 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'settings':
         set({ settings: ev.settings });
+        break;
+      case 'request': {
+        const requests = get().requests.filter((r) => r.id !== ev.request.id);
+        requests.push(ev.request);
+        set({ requests: requests.sort((a, b) => a.createdAt - b.createdAt) });
+        break;
+      }
+      case 'ceo':
+        set({ ceo: ev.ceo });
+        break;
+      case 'message': {
+        set({ messages: [...get().messages.slice(-199), ev.message] });
+        const o = get().overlay;
+        const reading = o?.kind === 'phone' && (o.tab ?? 'chat') === 'chat';
+        if (ev.message.from === 'ceo' && !reading) {
+          chirp();
+          const ceo = get().agents[CEO_ID]?.name ?? 'CEO';
+          const text = ev.message.text.replace(/\s+/g, ' ');
+          get().pushToast('info', `📱 ${ceo}: ${text.length > 110 ? `${text.slice(0, 109)}…` : text}`);
+        }
+        break;
+      }
+      case 'phoneRead':
+        set({ phoneReadAt: Math.max(get().phoneReadAt, ev.at) });
         break;
       case 'toast':
         get().pushToast(ev.level, ev.text);
@@ -240,6 +295,19 @@ export const agentsOnRepo = (agents: Record<string, Agent>, repoId: string) =>
     .sort((a, b) => (a.role === b.role ? a.desk - b.desk : a.role === 'dev' ? -1 : 1));
 
 export const isBusy = (a: Agent) => a.status === 'preparing' || a.status === 'working';
+
+/** CEO messages the manager hasn't seen yet (proposals are counted by pendingRequests instead). */
+export const unreadMessages = (messages: PhoneMessage[], readAt: number) => messages.filter((m) => m.from === 'ceo' && !m.requestId && m.at > readAt).length;
+
+export const pendingRequests = (requests: HireRequestView[]) => requests.filter((r) => r.status === 'pending');
+
+/** The red dot on the phone: decisions waiting on the manager plus unread messages. */
+export function usePhoneBadge() {
+  const requests = useStore((s) => s.requests);
+  const messages = useStore((s) => s.messages);
+  const readAt = useStore((s) => s.phoneReadAt);
+  return pendingRequests(requests).length + unreadMessages(messages, readAt);
+}
 
 export interface KanbanCard {
   key: string;
@@ -323,9 +391,14 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
   }
 
   const claimed = new Set<number>([...progress.map((c) => c.number), ...openPulls.flatMap((p) => p.closesIssues)]);
+  const open = new Set(repo.issues.map((i) => i.number));
   const backlog: KanbanCard[] = repo.issues
     .filter((i) => !claimed.has(i.number))
-    .map((i) => ({ key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: i.labels.slice(0, 2).join(', ') || undefined }));
+    .map((i) => {
+      const waits = blockers(i.body, open);
+      const labels = i.labels.map((l) => l.replace(/^swarm:/i, '🎯 ')).slice(0, 2).join(', ');
+      return { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: waits.length ? `⏳ after #${waits.join(', #')}` : labels || undefined };
+    });
 
   const merged: KanbanCard[] = repo.pulls
     .filter((p) => p.state === 'MERGED')

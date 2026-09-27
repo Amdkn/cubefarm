@@ -1,7 +1,8 @@
 import path from 'node:path';
 import type { Backend } from './backend.ts';
-import type { LogEntry, SessionCallbacks, SessionHandle, SessionOptions } from './agentRunner.ts';
+import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import type { LocalFolder } from './workspace.ts';
 
 // `npm run demo`: a fake GitHub and fake Claude Code sessions, so the office (including the
 // dev → QA → fix loop) can be explored without spending any usage or touching real repos.
@@ -254,6 +255,24 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
 export function createDemoBackend(): Backend {
   // Tie each fake session back to its repo via the desk directory name.
   const deskRepo = new Map<string, string>();
+  // A pretend projects folder: the demo repos, one git folder that isn't on GitHub yet, and one plain folder.
+  const folders = new Map<string, LocalFolder>();
+  const addFolder = (name: string, github: string | null, git = true) =>
+    folders.set(name, { name, path: `/demo/projects/${name}`, git, github, modified: Date.now() - folders.size * 3_600_000 });
+  for (const r of repos.values()) addFolder(r.fullName.split('/')[1], r.fullName);
+  addFolder('sketchbook', null);
+  addFolder('recipe-notes', null, false);
+  const newRepo = (name: string, description = '') => {
+    const fullName = `demo-co/${name}`;
+    if (!repos.has(fullName)) repos.set(fullName, { fullName, description, issues: [], pulls: [], nextNumber: 1 });
+    addFolder(name, fullName);
+    return fullName;
+  };
+  const folderOf = (dir: string) => {
+    const f = folders.get(dir.replace(/\\/g, '/').split('/').pop() ?? '');
+    if (!f) throw new Error(`${dir} is not a folder`);
+    return f;
+  };
   return {
     demo: true,
     user: async () => 'demo-manager',
@@ -264,18 +283,24 @@ export function createDemoBackend(): Backend {
       if (!r) throw new Error(`Unknown demo repo ${fullName}`);
       return { nameWithOwner: fullName, description: r.description, url: `https://github.com/${fullName}`, defaultBranch: 'main' };
     },
-    createRepo: async (name, opts) => {
-      const fullName = `${opts.owner ?? 'demo-co'}/${name}`;
-      repos.set(fullName, { fullName, description: opts.description ?? '', issues: [], pulls: [], nextNumber: 1 });
-      return fullName;
+    setLocalPath: () => undefined,
+    scanProjects: async () => [...folders.values()].sort((a, b) => b.modified - a.modified),
+    inspectFolder: async (dir) => folderOf(dir),
+    publishFolder: async (dir, opts) => {
+      const f = folderOf(dir);
+      return f.github ?? newRepo(f.name, opts.description);
+    },
+    createProject: async (_root, name, opts) => {
+      if (folders.has(name)) throw new Error(`/demo/projects/${name} already exists. Pick another name, or connect that folder instead.`);
+      return { fullName: newRepo(name, opts.description), path: `/demo/projects/${name}` };
     },
     listIssues: async (fullName) => [...(repos.get(fullName)?.issues ?? [])],
     listPulls: async (fullName) => [...(repos.get(fullName)?.pulls ?? [])],
-    createIssue: async (fullName, title, body) => {
+    createIssue: async (fullName, title, body, labels = []) => {
       const r = repos.get(fullName);
       if (!r) throw new Error('Unknown repo');
       const n = r.nextNumber++;
-      r.issues.push(issue(n, title, body, fullName));
+      r.issues.push(issue(n, title, body, fullName, labels));
       return n;
     },
     mergePull: async (fullName, number) => {
@@ -323,6 +348,255 @@ export function createDemoBackend(): Backend {
     },
     removeDesk: async () => undefined,
     releaseDesk: async () => undefined,
-    startSession: (opts, cb) => fakeSession(opts, cb, deskRepo.get(opts.cwd) ?? [...repos.keys()][0]),
+    startSession: (opts, cb) => (opts.role === 'ceo' ? ceoSession(opts, cb) : fakeSession(opts, cb, deskRepo.get(opts.cwd) ?? [...repos.keys()][0])),
+  };
+}
+
+// ---------- the demo CEO ----------
+
+interface Profile {
+  summary: string;
+  qa: string;
+  qaTitle: string;
+  qaJob: string;
+  devTitle: string;
+  devSpecialty: string;
+  devJob: string;
+  hires: { title: string; specialty: string; job_description: string; reason: string }[];
+}
+
+const PROFILES: Record<string, Profile> = {
+  'pixel-todo': {
+    summary: 'Todo web app · React + Vite + TypeScript',
+    qa: '- Add, complete, edit and delete todos; they survive a reload\n- Keyboard only: every action reachable, focus always visible\n- Phone width (375px): nothing overflows or gets cut off\n- No errors in the browser console',
+    qaTitle: 'UI QA tester',
+    qaJob: 'You test every PR the way a picky user would: click through the whole flow, try it on a phone-sized screen and with the keyboard only.',
+    devTitle: 'React UI engineer',
+    devSpecialty: 'frontend',
+    devJob: 'You own the React components and styling. Keep components small, reuse the existing hooks, and check every change at desktop and phone widths.',
+    hires: [
+      {
+        title: 'Accessibility engineer',
+        specialty: 'a11y',
+        job_description: 'You make the app work for everyone: keyboard navigation, focus management, ARIA roles and colour contrast. Test with the keyboard only.',
+        reason: 'Keyboard shortcuts and drag-and-drop are in the backlog, and both are easy to get wrong for keyboard and screen-reader users.',
+      },
+    ],
+  },
+  'weather-api': {
+    summary: 'REST API · Node + Express',
+    qa: '- Every endpoint: happy path, bad input (400), unknown city (404)\n- Response shapes match the OpenAPI document\n- Rate limiting returns 429 with Retry-After\n- Tests and lint pass',
+    qaTitle: 'API QA tester',
+    qaJob: 'You test the API from the outside: curl every endpoint, try bad input and edge cases, and compare responses with the OpenAPI document.',
+    devTitle: 'Backend engineer',
+    devSpecialty: 'backend',
+    devJob: 'You own the routes and data layer. Validate input at the edge, return consistent error shapes, and add tests for every endpoint you touch.',
+    hires: [
+      {
+        title: 'API reliability engineer',
+        specialty: 'reliability',
+        job_description: 'You own rate limiting, caching and error handling. Measure before you optimise and document every limit in the OpenAPI spec.',
+        reason: 'Rate limiting is in the backlog and the forecast endpoint will call an upstream service that needs caching and timeouts.',
+      },
+    ],
+  },
+};
+
+const GENERIC: Profile = {
+  summary: 'Web project · early stage',
+  qa: '- The app builds and starts\n- The changed feature works end to end in the browser\n- Phone width: nothing overflows\n- No console errors',
+  qaTitle: 'QA tester',
+  qaJob: 'You check every PR end to end in the browser, at desktop and phone widths.',
+  devTitle: 'Full-stack engineer',
+  devSpecialty: 'fullstack',
+  devJob: 'You build features end to end, from the UI down to the data.',
+  hires: [
+    {
+      title: 'Frontend engineer',
+      specialty: 'frontend',
+      job_description: 'You own the UI: layout, components and styling, checked at desktop and phone widths.',
+      reason: 'The project needs someone who owns the UI from the start.',
+    },
+  ],
+};
+
+interface DemoFloor {
+  floor: number;
+  repo: string;
+  brief: string | null;
+  team: { id: string; name: string; role: string; specialty: string | null; status: string }[];
+  backlog: unknown[];
+  pullRequests: unknown[];
+}
+
+/** A scripted CEO that uses the real office tools, so proposals, profiles and issues behave exactly as in the real thing. */
+function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
+  const office = opts.office!;
+  const timers: NodeJS.Timeout[] = [];
+  let stopped = false;
+  let done = false;
+  const wait = (ms: number) => new Promise<void>((resolve) => timers.push(setTimeout(resolve, ms)));
+  const step = async (entries: LogEntry[], ms = 900 + Math.random() * 1500) => {
+    if (stopped) throw new Error('Stopped by manager');
+    cb.tool(entries.find((e) => e.tool)?.tool ?? null);
+    cb.log(entries);
+    await wait(ms);
+  };
+  const status = async () => {
+    await step([{ kind: 'tool', tool: 'mcp__office__company_status', text: `⏺ ${describeOfficeTool('company_status', {})}` }]);
+    const s = JSON.parse(await office.call('company_status', {})) as { floors: DemoFloor[]; pendingProposals: unknown[] };
+    const people = s.floors.reduce((n, f) => n + f.team.length, 0);
+    const issues = s.floors.reduce((n, f) => n + f.backlog.length, 0);
+    cb.log([{ kind: 'result', text: `  ⎿ ${s.floors.length} floors · ${people} people · ${issues} open issues · ${s.pendingProposals.length} proposals pending` }]);
+    return s;
+  };
+  const use = async (name: string, args: Record<string, unknown>) => {
+    await step([{ kind: 'tool', tool: `mcp__office__${name}`, text: `⏺ ${describeOfficeTool(name, args)}` }]);
+    const out = await office.call(name, args);
+    cb.log([{ kind: out.startsWith('Refused') ? 'error' : 'result', text: `  ⎿ ${out.split('\n')[0].slice(0, 170)}` }]);
+    return out;
+  };
+  const read = (file: string, lines: number) => step([{ kind: 'tool', tool: 'Read', text: `⏺ Read ${file}` }, { kind: 'result', text: `  ⎿ Read ${lines} lines` }]);
+  const think = (text: string) => step([{ kind: 'thinking', text: '✻ Thinking…' }, { kind: 'text', text: `● ${text}` }], 1800);
+  const short = (s: string, n = 48) => (s.length > n ? `${s.slice(0, n - 1).trim()}…` : s);
+
+  const planIssues = async (floor: number, mission: string, team: DemoFloor['team']) => {
+    const first = await use('file_issue', {
+      floor,
+      title: 'Set up the project skeleton',
+      body: `Scaffold the app so the rest of the milestone has something to build on.\n\nBrief: ${mission}\n\nAcceptance criteria:\n- The dev server starts\n- A placeholder home page renders\n- Lint, tests and build scripts exist`,
+      specialty: 'frontend',
+    });
+    const n = Number(first.match(/#(\d+)/)?.[1] ?? 0);
+    await use('file_issue', {
+      floor,
+      title: `Build the core: ${short(mission, 60)}`,
+      body: `${n ? `Depends on #${n}\n\n` : ''}Implement the heart of the brief.\n\nAcceptance criteria:\n- The main flow works end to end\n- Covered by tests`,
+      specialty: 'frontend',
+    });
+    await use('file_issue', {
+      floor,
+      title: 'Polish: phone layout and empty states',
+      body: `${n ? `Depends on #${n}\n\n` : ''}Make every screen work at 375px and add friendly empty states.`,
+      specialty: 'frontend',
+    });
+    if (!team.some((a) => a.specialty === 'frontend')) {
+      await use('propose_hire', { floor, role: 'dev', ...GENERIC.hires[0], reason: 'All three issues are UI work and nobody on the floor owns the frontend yet.' });
+    }
+    return n;
+  };
+
+  const scripts = {
+    async onboard(floor: number, fullName: string) {
+      const s = await status();
+      const f = s.floors.find((x) => x.floor === floor);
+      if (!f) return 'That floor has gone, so there was nothing to onboard.';
+      const p = PROFILES[fullName.split('/')[1] ?? ''] ?? GENERIC;
+      await read(`${f.repo}/README.md`, 48);
+      await step([{ kind: 'tool', tool: 'Glob', text: '⏺ Glob src/**/*' }, { kind: 'result', text: '  ⎿ Found 23 files' }]);
+      await read('package.json', 36);
+      await think(`${p.summary}. Let me shape the team around that.`);
+      await use('set_floor_profile', { floor, summary: p.summary, qa_brief: p.qa });
+      const qa = f.team.find((a) => a.role === 'qa');
+      if (qa) await use('update_job', { agent_id: qa.id, title: p.qaTitle, job_description: p.qaJob });
+      const dev = f.team.find((a) => a.role === 'dev' && !a.specialty);
+      if (dev) await use('update_job', { agent_id: dev.id, title: p.devTitle, specialty: p.devSpecialty, job_description: p.devJob });
+      const proposed: string[] = [];
+      for (const h of p.hires) if (!(await use('propose_hire', { floor, role: 'dev', ...h })).startsWith('Refused')) proposed.push(h.title);
+      let planned = '';
+      if (f.brief && f.backlog.length === 0) {
+        const n = await planIssues(floor, f.brief, f.team);
+        planned = ` I also turned your brief into three issues; #${n} sets up the skeleton and the other two wait for it.`;
+      }
+      return [
+        `Floor ${floor}: ${p.summary}.`,
+        `I wrote a QA brief for it${qa ? `, made ${qa.name} our ${p.qaTitle}` : ''}${dev ? ` and ${dev.name} our ${p.devTitle}` : ''}.`,
+        proposed.length ? `I've proposed hiring: ${proposed.join(', ')}. The resume${proposed.length === 1 ? ' is' : 's are'} waiting on your phone.` : '',
+        planned,
+      ]
+        .filter(Boolean)
+        .join(' ');
+    },
+    async plan(floor: number, mission: string) {
+      const s = await status();
+      const f = s.floors.find((x) => x.floor === floor);
+      if (!f) return 'That floor has gone, so there was nothing to plan.';
+      await read(`${f.repo}/README.md`, 12);
+      await think("Foundation first, so the parallel work doesn't collide.");
+      const n = await planIssues(floor, mission, f.team);
+      return `I turned the brief into three issues on floor ${floor}. #${n} sets up the skeleton; the other two say "Depends on #${n}", so nobody starts them early.`;
+    },
+    async review() {
+      const s = await status();
+      await think('Checking each floor for idle people and stuck work.');
+      for (const f of s.floors) {
+        const idle = f.team.filter((a) => a.role === 'dev' && !a.specialty && (a.status === 'idle' || a.status === 'done'));
+        const devs = f.team.filter((a) => a.role === 'dev').length;
+        if (devs >= 6 && idle.length >= 2 && f.backlog.length < devs) {
+          await use('propose_let_go', { agent_id: idle[idle.length - 1].id, reason: `Floor ${f.floor} has ${devs} developers for ${f.backlog.length} open issues; ${idle.length} of them are idle.` });
+          return `Floor ${f.floor} is overstaffed: ${devs} developers for ${f.backlog.length} open issues. I suggest letting ${idle[idle.length - 1].name} go; it's on your phone.`;
+        }
+      }
+      const issues = s.floors.reduce((n, f) => n + f.backlog.length, 0);
+      const prs = s.floors.reduce((n, f) => n + f.pullRequests.length, 0);
+      return `All ${s.floors.length} floors look healthy: ${issues} open issues and ${prs} pull requests in flight. No changes needed.`;
+    },
+    async chat(text: string) {
+      const s = await status();
+      await think('Reading your message.');
+      const people = s.floors.reduce((n, f) => n + f.team.length, 0);
+      const issues = s.floors.reduce((n, f) => n + f.backlog.length, 0);
+      const pending = s.pendingProposals.length;
+      return `We have ${s.floors.length} floors, ${people} people and ${issues} open issues.${pending ? ` ${pending} proposal${pending === 1 ? ' is' : 's are'} waiting for you in Hires.` : ''} (I'm the demo CEO, so I can't act on "${short(text)}", but the real one would.)`;
+    },
+  };
+
+  const prompt = opts.prompt;
+  const where = prompt.match(/[Ff]loor (\d+) \(([^,)]+)/);
+  const run = /just joined the company/.test(prompt)
+    ? () => scripts.onboard(Number(where?.[1]), where?.[2] ?? '')
+    : /has a brief for floor/.test(prompt)
+      ? () => scripts.plan(Number(where?.[1]), prompt.match(/"""([\s\S]*?)"""/)?.[1]?.trim() ?? '')
+      : /Periodic review/.test(prompt)
+        ? () => scripts.review()
+        : () => scripts.chat(prompt.split('\n').slice(1).join(' ').trim() || prompt);
+
+  const finish = (ok: boolean, text: string, error?: string) => {
+    if (done) return;
+    done = true;
+    cb.tool(null);
+    cb.finished({ ok, text, costUsd: ok ? 0.4 + Math.random() : 0.05, turns: 6 + Math.floor(Math.random() * 10), errors: error ? [error] : [] });
+  };
+
+  timers.push(
+    setTimeout(async () => {
+      try {
+        cb.log([{ kind: 'system', text: `✻ Claude Code (demo) · ${opts.model} · ${opts.effort} effort · CEO` }]);
+        const reply = await run();
+        cb.log([{ kind: 'text', text: `● ${reply}` }]);
+        cb.turn?.(reply);
+        finish(true, reply);
+      } catch (err) {
+        finish(false, '', stopped ? 'Stopped by manager' : (err as Error).message);
+      }
+    }, 500),
+  );
+
+  return {
+    send(text) {
+      timers.push(
+        setTimeout(() => {
+          if (stopped || done) return;
+          const said = text.split('\n').slice(1).join(' ').trim() || text;
+          cb.log([{ kind: 'text', text: `● Noted: "${short(said, 70)}"` }]);
+          cb.turn?.(`Noted, I'll factor that in: "${short(said, 90)}"`);
+        }, 1500),
+      );
+    },
+    stop() {
+      stopped = true;
+      timers.forEach(clearTimeout);
+      finish(false, '', 'Stopped by manager');
+    },
   };
 }

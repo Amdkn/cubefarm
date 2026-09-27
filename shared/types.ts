@@ -55,6 +55,11 @@ export interface RepoView {
   autoAssign: boolean;
   browserTesting: boolean;
   links: string[]; // ids of related repos this floor's agents can read for context
+  mission: string; // the manager's brief: what this floor is building
+  summary: string; // the CEO's one-line read of the project, e.g. "3D browser game · Three.js + Vite"
+  qaBrief: string; // how QA should test this kind of project (written by the CEO, editable)
+  localPath: string | null; // the manager's own project folder, when the floor lives in one
+  checkoutPath: string; // where the floor's main checkout is on disk (localPath, or a clone the office manages)
   cloneStatus: 'pending' | 'cloning' | 'ready' | 'error';
   cloneError?: string;
   issues: IssueInfo[]; // open issues
@@ -63,7 +68,20 @@ export interface RepoView {
   syncError?: string;
 }
 
-export type AgentRole = 'dev' | 'qa';
+/** A folder in the manager's projects folder, as offered when adding a floor. */
+export interface ProjectFolderView {
+  name: string;
+  path: string;
+  git: boolean;
+  github: string | null; // owner/name of its GitHub origin
+  floor: number | null; // already a floor in the office
+}
+
+/** dev and qa are the two pipeline lanes on every floor; the one CEO works in the lobby and runs the company. */
+export type AgentRole = 'dev' | 'qa' | 'ceo';
+
+/** Fixed id of the CEO agent. */
+export const CEO_ID = 'ceo';
 
 /** How the cartoon character is drawn. Picked from the agent's name when hired; the manager can change it. */
 export type AgentLook = 'feminine' | 'masculine';
@@ -76,6 +94,10 @@ export interface AgentView {
   name: string;
   repoId: string;
   role: AgentRole;
+  title: string; // job title, e.g. "Three.js graphics engineer" ('' = plain developer / QA tester)
+  specialty: string; // routes issues labelled swarm:<specialty> to this agent first ('' = generalist)
+  brief: string; // job description for this project, added to the agent's instructions
+  hiredBy: 'manager' | 'ceo';
   look: AgentLook;
   task: AgentTask | null;
   desk: number; // desk slot on the floor (dev desks and QA lab stations are numbered separately)
@@ -136,6 +158,57 @@ export interface SwarmSettings {
   defaultModel: string;
   defaultEffort: EffortLevel;
   permissionMode: 'guarded' | 'bypass';
+  hiring: 'approve' | 'auto'; // CEO proposals wait for the manager, or go through while the floor is under teamCap
+  teamCap: number; // most agents per floor the CEO may reach without the manager's approval (auto mode)
+  ceoHeartbeatMin: number; // minutes between the CEO's periodic reviews; 0 = off
+  managerName: string; // what the office calls you
+  companyName: string;
+  projectsDir: string; // where your project folders live; new projects are created here
+  setupDone: boolean; // the first-run setup wizard has been completed or skipped
+  tutorialStep: number; // index of the current tutorial step; -1 when finished or skipped
+}
+
+/** A CEO proposal to hire someone or let someone go. The manager (the board) decides. */
+export interface HireRequestView {
+  id: string;
+  kind: 'hire' | 'let-go';
+  repoId: string;
+  role: 'dev' | 'qa';
+  agentId: string | null; // let-go: who; hire: who was hired once approved
+  name: string; // the candidate's name (let-go: the agent's name)
+  title: string;
+  specialty: string;
+  brief: string;
+  reason: string;
+  model: string;
+  effort: EffortLevel | '';
+  look: AgentLook;
+  color: string;
+  hair: string;
+  skin: string;
+  status: 'pending' | 'approved' | 'rejected';
+  note: string; // the manager's reason when rejecting
+  createdAt: number;
+  decidedAt: number | null;
+  decidedBy: 'manager' | 'auto' | null;
+}
+
+/** One message in the phone thread between the manager and the CEO. */
+export interface PhoneMessage {
+  id: number;
+  from: 'ceo' | 'manager' | 'office'; // office = notes from the building itself (decisions, errors)
+  text: string;
+  at: number;
+  requestId?: string; // a hire / let-go proposal this message is about
+}
+
+export type CeoJobKind = 'onboard' | 'plan' | 'review' | 'chat';
+
+export interface CeoInfo {
+  queue: { kind: CeoJobKind; label: string }[]; // jobs waiting for the CEO
+  job: { kind: CeoJobKind; label: string } | null; // what the CEO is doing now
+  lastReviewAt: number | null;
+  nextReviewAt: number | null; // null when the heartbeat is off
 }
 
 export interface WorldSnapshot {
@@ -148,6 +221,10 @@ export interface WorldSnapshot {
   repos: RepoView[];
   agents: AgentView[];
   qa: QaView[];
+  requests: HireRequestView[];
+  ceo: CeoInfo;
+  messages: PhoneMessage[];
+  phoneReadAt: number; // CEO messages newer than this are unread
 }
 
 export type ServerEvent =
@@ -161,6 +238,10 @@ export type ServerEvent =
   | { type: 'qa'; qa: QaView }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }
   | { type: 'settings'; settings: SwarmSettings }
+  | { type: 'request'; request: HireRequestView }
+  | { type: 'ceo'; ceo: CeoInfo }
+  | { type: 'message'; message: PhoneMessage }
+  | { type: 'phoneRead'; at: number }
   | { type: 'toast'; level: 'info' | 'success' | 'error'; text: string };
 
 export interface GhRepoSummary {

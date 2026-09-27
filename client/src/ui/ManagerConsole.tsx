@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
-import { agentsOnRepo, useStore, type ManagerTab } from '../store';
-import type { EffortLevel, GhRepoSummary, RepoView } from '../../../shared/types';
+import { agentsOnRepo, pendingRequests, useStore, type ManagerTab } from '../store';
+import { CEO_ID, type EffortLevel, type RepoView } from '../../../shared/types';
+import { confirmDialog } from './Confirm';
 import { IssueForm } from './KanbanView';
 import { Panel } from './Overlays';
+import { Resume } from './Phone';
+import { ProjectPicker } from './ProjectPicker';
 import { StatusPill } from './TerminalView';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
@@ -19,113 +22,6 @@ async function attempt<T>(fn: () => Promise<T>): Promise<T | undefined> {
 
 // ---------- floors ----------
 
-function ConnectRepo() {
-  const repos = useStore((s) => s.repos);
-  const [list, setList] = useState<GhRepoSummary[] | null>(null);
-  const [owner, setOwner] = useState('');
-  const [q, setQ] = useState('');
-  const [manual, setManual] = useState('');
-  const [busy, setBusy] = useState<string | null>(null);
-
-  const load = (o?: string) => {
-    setList(null);
-    void attempt(() => api.githubRepos(o)).then((r) => setList(r ?? []));
-  };
-  useEffect(() => load(), []);
-
-  const connected = new Set(repos.map((r) => r.id.toLowerCase()));
-  const shown = (list ?? []).filter((r) => !connected.has(r.nameWithOwner.toLowerCase()) && r.nameWithOwner.toLowerCase().includes(q.toLowerCase())).slice(0, 40);
-  const connect = async (name: string) => {
-    setBusy(name);
-    await attempt(() => api.connectRepo(name));
-    setBusy(null);
-  };
-
-  return (
-    <div className="card">
-      <h3>🔌 Connect an existing repo</h3>
-      <div className="row">
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter your repos…" />
-        <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="Org / user (optional)" style={{ maxWidth: 200 }} />
-        <button className="btn" onClick={() => load(owner.trim() || undefined)}>
-          List
-        </button>
-      </div>
-      <div className="repo-list">
-        {list === null && <div className="muted small">Asking gh for your repos…</div>}
-        {list && shown.length === 0 && <div className="muted small">No matching repos.</div>}
-        {shown.map((r) => (
-          <div key={r.nameWithOwner} className="repo-row">
-            <div>
-              <b>{r.nameWithOwner}</b> <span className="chip">{r.visibility.toLowerCase()}</span>
-              {r.description && <div className="muted small">{r.description}</div>}
-            </div>
-            <button className="btn btn-small btn-good" disabled={busy === r.nameWithOwner} onClick={() => connect(r.nameWithOwner)}>
-              {busy === r.nameWithOwner ? 'Moving in…' : 'Add floor'}
-            </button>
-          </div>
-        ))}
-      </div>
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (manual.trim()) void connect(manual.trim()).then(() => setManual(''));
-        }}
-      >
-        <input value={manual} onChange={(e) => setManual(e.target.value)} placeholder="…or type owner/name" />
-        <button className="btn" disabled={!manual.trim() || !!busy}>
-          Connect
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function CreateRepo() {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [owner, setOwner] = useState('');
-  const [visibility, setVisibility] = useState<'private' | 'public'>('private');
-  const [busy, setBusy] = useState(false);
-  return (
-    <form
-      className="card"
-      onSubmit={async (e) => {
-        e.preventDefault();
-        if (!name.trim()) return;
-        setBusy(true);
-        const ok = await attempt(() => api.createRepo({ name: name.trim(), description, visibility, owner: owner.trim() || undefined }));
-        setBusy(false);
-        if (ok) {
-          setName('');
-          setDescription('');
-        }
-      }}
-    >
-      <h3>✨ Start a new project</h3>
-      <p className="muted small">Creates a new GitHub repo (with a README so agents have a branch to work from) and gives it a floor.</p>
-      <div className="row">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="repo-name" />
-        <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="Org (optional)" style={{ maxWidth: 180 }} />
-      </div>
-      <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Short description" />
-      <div className="row">
-        <label className="toggle">
-          <input type="radio" checked={visibility === 'private'} onChange={() => setVisibility('private')} /> Private
-        </label>
-        <label className="toggle">
-          <input type="radio" checked={visibility === 'public'} onChange={() => setVisibility('public')} /> Public
-        </label>
-        <span className="spacer" />
-        <button className="btn btn-good" disabled={busy || !name.trim()}>
-          {busy ? 'Creating…' : 'Create repo & floor'}
-        </button>
-      </div>
-    </form>
-  );
-}
-
 function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
   const agents = useStore((s) => s.agents);
   const goToFloor = useStore((s) => s.goToFloor);
@@ -140,9 +36,13 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
           <a href={repo.url} target="_blank" rel="noreferrer">
             <b>{repo.fullName}</b>
           </a>
+          {repo.summary && <div className="small">🧠 {repo.summary}</div>}
           <div className="muted small">
-            {team.length} agents · {repo.issues.length} open issues · {repo.pulls.filter((p) => p.state === 'OPEN').length} open PRs · default branch <code>{repo.defaultBranch}</code> · clone:{' '}
-            {repo.cloneStatus}
+            {team.length} agents · {repo.issues.length} open issues · {repo.pulls.filter((p) => p.state === 'OPEN').length} open PRs · default branch <code>{repo.defaultBranch}</code>
+            {repo.cloneStatus !== 'ready' && ` · checkout: ${repo.cloneStatus}`}
+          </div>
+          <div className="muted small" title={repo.localPath ? 'Your own project folder' : 'A clone the office manages'}>
+            📁 <code>{repo.checkoutPath}</code>
           </div>
           {repo.cloneError && <div className="term-error small">clone failed: {repo.cloneError}</div>}
           {repo.syncError && <div className="term-error small">sync failed: {repo.syncError}</div>}
@@ -163,7 +63,12 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
         <button
           className="btn btn-small btn-ghost"
           onClick={() => {
-            if (confirm(`Disconnect ${repo.fullName}? Its agents are let go. Nothing is deleted on GitHub, and local clones stay on disk.`)) void attempt(() => api.disconnectRepo(repo.id));
+            void confirmDialog({
+              tone: 'danger',
+              title: `Disconnect ${repo.fullName}?`,
+              body: `Everyone on this floor is let go. Nothing is deleted on GitHub, and ${repo.localPath ? 'your folder stays exactly as it is' : 'the local clone stays on disk'}.`,
+              confirm: 'Disconnect',
+            }).then((ok) => ok && attempt(() => api.disconnectRepo(repo.id)));
           }}
         >
           Disconnect
@@ -194,14 +99,184 @@ function FloorsTab() {
     <div className="tab-grid">
       <div>
         <h3 className="section">🏢 Floors</h3>
-        {repos.length === 0 && <p className="muted">No floors yet. Connect a repo or start a new project →</p>}
+        {repos.length === 0 && <p className="muted">No floors yet. Add a project →</p>}
         {[...repos].sort((a, b) => a.floor - b.floor).map((r) => (
           <FloorRow key={r.id} repo={r} all={repos} />
         ))}
       </div>
+      <div className="card">
+        <h3>➕ Add a project</h3>
+        <ProjectPicker />
+      </div>
+    </div>
+  );
+}
+
+// ---------- CEO ----------
+
+function FloorBrief({ repo }: { repo: RepoView }) {
+  const [mission, setMission] = useState(repo.mission);
+  useEffect(() => setMission(repo.mission), [repo.mission]);
+  return (
+    <div className="card floor-card" style={{ ['--accent' as string]: repo.color }}>
+      <div className="row">
+        <span className="floor-badge">{repo.floor}</span>
+        <div className="grow">
+          <b>{repo.fullName}</b>
+          <div className="muted small">{repo.summary ? `🧠 ${repo.summary}` : 'The CEO has not studied this floor yet.'}</div>
+        </div>
+        <button className="btn btn-small btn-ghost" onClick={() => void attempt(() => api.onboardFloor(repo.id))} title="Study the repo again and rethink the team">
+          Re-study
+        </button>
+      </div>
+      <textarea value={mission} onChange={(e) => setMission(e.target.value)} rows={2} placeholder="Brief: what should this floor build next? The CEO turns it into issues and a team." />
+      <div className="row">
+        <button className="btn btn-small" disabled={mission === repo.mission} onClick={() => void attempt(() => api.updateRepo(repo.id, { mission }))}>
+          Save brief
+        </button>
+        <span className="spacer" />
+        <button className="btn btn-small btn-good" disabled={!mission.trim()} onClick={() => void attempt(() => api.planFloor(repo.id, mission))}>
+          🧠 Ask the CEO to plan it
+        </button>
+      </div>
+      <details className="small">
+        <summary>QA brief{repo.qaBrief ? '' : ' (none yet)'}</summary>
+        <textarea
+          key={repo.qaBrief}
+          rows={4}
+          defaultValue={repo.qaBrief}
+          placeholder="What QA testers must check on every PR for this project."
+          onBlur={(e) => e.target.value !== repo.qaBrief && void attempt(() => api.updateRepo(repo.id, { qaBrief: e.target.value }))}
+        />
+      </details>
+    </div>
+  );
+}
+
+function CeoTab() {
+  const ceo = useStore((s) => s.agents[CEO_ID]);
+  const log = useStore((s) => s.logs[CEO_ID]) ?? [];
+  const info = useStore((s) => s.ceo);
+  const repos = useStore((s) => s.repos);
+  const requests = useStore((s) => s.requests);
+  const openOverlay = useStore((s) => s.openOverlay);
+  const [text, setText] = useState('');
+  const scroller = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [log.length]);
+  if (!ceo) return <p className="muted">The corner office is empty.</p>;
+  const working = ceo.status === 'working';
+  const pending = pendingRequests(requests);
+  const decided = requests.filter((r) => r.status !== 'pending').slice(-6).reverse();
+  return (
+    <div className="tab-grid">
       <div>
-        <ConnectRepo />
-        <CreateRepo />
+        <div className="card">
+          <div className="row">
+            <span className="avatar" style={{ background: ceo.color }}>
+              {ceo.name[0]}
+            </span>
+            <input
+              className="inline"
+              defaultValue={ceo.name}
+              style={{ maxWidth: 140, fontWeight: 700 }}
+              onBlur={(e) => e.target.value.trim() && e.target.value !== ceo.name && void attempt(() => api.updateAgent(ceo.id, { name: e.target.value }))}
+            />
+            <span className="muted small">CEO</span>
+            <StatusPill status={ceo.status} />
+            <span className="spacer" />
+            <input
+              className="inline"
+              list="models-ceo"
+              defaultValue={ceo.model}
+              title="The CEO's model"
+              style={{ maxWidth: 150 }}
+              onBlur={(e) => e.target.value !== ceo.model && void attempt(() => api.updateAgent(ceo.id, { model: e.target.value }))}
+            />
+            <datalist id="models-ceo">
+              {MODELS.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+            <select value={ceo.effort} title="The CEO's effort" onChange={(e) => void attempt(() => api.updateAgent(ceo.id, { effort: e.target.value }))} style={{ width: 'auto' }}>
+              {EFFORTS.map((x) => (
+                <option key={x} value={x}>
+                  {x}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="small">
+            <b>Now:</b> {working ? info.job?.label : 'free'}
+            {info.queue.length > 0 && (
+              <>
+                {' '}
+                · <b>Up next:</b> {info.queue.map((j) => j.label).join(' → ')}
+              </>
+            )}
+          </div>
+          <div className="muted small">
+            {info.nextReviewAt ? `Next company review around ${new Date(info.nextReviewAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (skipped if nothing changed).` : 'Periodic reviews are off (Settings).'}
+          </div>
+          <div className="term ceo-term" ref={scroller}>
+            {log.length === 0 && <div className="term-line term-system">(nothing yet)</div>}
+            {log.map((l) => (
+              <div key={l.id} className={`term-line term-${l.kind}`}>
+                {l.text || ' '}
+              </div>
+            ))}
+          </div>
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!text.trim()) return;
+              const t = text;
+              setText('');
+              void attempt(() => api.messageCeo(t));
+            }}
+          >
+            <input value={text} onChange={(e) => setText(e.target.value)} placeholder={`Message ${ceo.name} (or press P anywhere for your phone)…`} />
+            <button className="btn" disabled={!text.trim()}>
+              Send
+            </button>
+          </form>
+          <div className="row">
+            {working && (
+              <button className="btn btn-small btn-bad" onClick={() => void attempt(() => api.stop(ceo.id))}>
+                ■ Stop
+              </button>
+            )}
+            <button className="btn btn-small" disabled={repos.length === 0} onClick={() => void attempt(() => api.ceoReview())}>
+              🔎 Review the company now
+            </button>
+            <button className="btn btn-small" onClick={() => openOverlay({ kind: 'phone', tab: 'chat' })}>
+              📱 Open the phone
+            </button>
+          </div>
+        </div>
+      </div>
+      <div>
+        <h3 className="section">📄 Hiring {pending.length > 0 && <span className="badge">{pending.length}</span>}</h3>
+        {pending.length === 0 && <p className="muted small">No proposals waiting. The CEO proposes hires when they study a floor or notice the team can't cover the work.</p>}
+        {pending.map((r) => (
+          <Resume key={r.id} req={r} />
+        ))}
+        {decided.length > 0 && (
+          <details className="small" style={{ marginBottom: 12 }}>
+            <summary>Recent decisions</summary>
+            {decided.map((r) => (
+              <Resume key={r.id} req={r} />
+            ))}
+          </details>
+        )}
+        <h3 className="section">🗺️ Project briefs</h3>
+        {repos.length === 0 && <p className="muted small">Connect a repo first.</p>}
+        {[...repos].sort((a, b) => a.floor - b.floor).map((r) => (
+          <FloorBrief key={r.id} repo={r} />
+        ))}
       </div>
     </div>
   );
@@ -215,6 +290,7 @@ function TeamTab() {
   const settings = useStore((s) => s.settings);
   const openOverlay = useStore((s) => s.openOverlay);
   const [names, setNames] = useState<Record<string, string>>({});
+  const [openBrief, setOpenBrief] = useState<string | null>(null);
   if (repos.length === 0) return <p className="muted">Connect a repo first; agents need a floor to sit on.</p>;
   return (
     <div>
@@ -254,7 +330,8 @@ function TeamTab() {
             <table className="team">
               <tbody>
                 {team.map((a) => (
-                  <tr key={a.id}>
+                  <Fragment key={a.id}>
+                  <tr>
                     <td>
                       <span className="dot" style={{ background: a.color }} />
                     </td>
@@ -265,8 +342,37 @@ function TeamTab() {
                         onBlur={(e) => e.target.value.trim() && e.target.value !== a.name && void attempt(() => api.updateAgent(a.id, { name: e.target.value }))}
                       />
                     </td>
+                    <td className="nowrap">
+                      <span className="chip" title={a.hiredBy === 'ceo' ? 'Hired on the CEO\'s proposal' : undefined}>
+                        {a.role === 'qa' ? '🔍 QA' : '💻 Dev'}
+                        {a.hiredBy === 'ceo' ? ' · 🧠' : ''}
+                      </span>
+                    </td>
                     <td>
-                      <span className="chip">{a.role === 'qa' ? '🔍 QA' : '💻 Dev'}</span>
+                      <input
+                        key={`t-${a.title}`}
+                        className="inline"
+                        defaultValue={a.title}
+                        placeholder={a.role === 'qa' ? 'QA tester' : 'Developer'}
+                        title="Job title"
+                        onBlur={(e) => e.target.value !== a.title && void attempt(() => api.updateAgent(a.id, { title: e.target.value }))}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        key={`s-${a.specialty}`}
+                        className="inline"
+                        style={{ width: 96 }}
+                        defaultValue={a.specialty}
+                        placeholder="specialty"
+                        title="Issues labelled swarm:<specialty> go to this agent first"
+                        onBlur={(e) => e.target.value !== a.specialty && void attempt(() => api.updateAgent(a.id, { specialty: e.target.value }))}
+                      />
+                    </td>
+                    <td>
+                      <button className="btn btn-small btn-ghost" title="Job description" onClick={() => setOpenBrief(openBrief === a.id ? null : a.id)}>
+                        📝{a.brief ? '' : ' +'}
+                      </button>
                     </td>
                     <td>
                       <select
@@ -307,12 +413,31 @@ function TeamTab() {
                       </button>{' '}
                       <button
                         className="btn btn-small btn-ghost"
-                        onClick={() => confirm(`Let ${a.name} go?`) && void attempt(() => api.fireAgent(a.id))}
+                        onClick={() =>
+                          void confirmDialog({ tone: 'danger', icon: '👋', title: `Let ${a.name} go?`, body: 'Their worktree is removed. Branches they pushed stay on GitHub.', confirm: `Let ${a.name} go` }).then(
+                            (ok) => ok && attempt(() => api.fireAgent(a.id)),
+                          )
+                        }
                       >
                         Let go
                       </button>
                     </td>
                   </tr>
+                  {openBrief === a.id && (
+                    <tr>
+                      <td />
+                      <td colSpan={11}>
+                        <textarea
+                          key={`b-${a.brief}`}
+                          rows={3}
+                          defaultValue={a.brief}
+                          placeholder={`What ${a.name} owns on this project and how they should work. It's added to their instructions.`}
+                          onBlur={(e) => e.target.value !== a.brief && void attempt(() => api.updateAgent(a.id, { brief: e.target.value }))}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
@@ -422,6 +547,28 @@ function SettingsTab() {
           <input type="number" min={1} max={32} defaultValue={settings.maxConcurrent} onBlur={(e) => set({ maxConcurrent: Number(e.target.value) })} />
         </label>
         <p className="muted small">Every agent shares your Claude subscription's usage limits, so more parallel sessions burn through them faster.</p>
+        <h3>🧠 The CEO</h3>
+        <label className="toggle block">
+          <input type="radio" checked={settings.hiring === 'approve'} onChange={() => set({ hiring: 'approve' })} />
+          <span>
+            <b>I approve every hire</b> (recommended): the CEO's proposals wait on your phone.
+          </span>
+        </label>
+        <label className="toggle block">
+          <input type="radio" checked={settings.hiring === 'auto'} onChange={() => set({ hiring: 'auto' })} />
+          <span>
+            <b>Auto-approve</b> while a floor has fewer people than the team cap. Anything beyond the cap still waits for you.
+          </span>
+        </label>
+        <label className="field">
+          <span>Team cap per floor</span>
+          <input type="number" min={1} max={15} defaultValue={settings.teamCap} onBlur={(e) => set({ teamCap: Number(e.target.value) })} />
+        </label>
+        <label className="field">
+          <span>Company review every (minutes, 0 = off)</span>
+          <input type="number" min={0} max={1440} defaultValue={settings.ceoHeartbeatMin} onBlur={(e) => set({ ceoHeartbeatMin: Number(e.target.value) })} />
+        </label>
+        <p className="muted small">A review is skipped when nothing changed since the last one. The CEO's own model and effort are on the CEO tab.</p>
       </div>
       <div className="card">
         <h3>🛡️ Permissions</h3>
@@ -437,12 +584,30 @@ function SettingsTab() {
             <b>Bypass</b>: no permission checks at all. Only use this in a disposable VM or container.
           </span>
         </label>
+        <h3>🏢 Company</h3>
+        <label className="field">
+          <span>Your name</span>
+          <input defaultValue={settings.managerName} placeholder={user ?? 'Boss'} onBlur={(e) => e.target.value !== settings.managerName && set({ managerName: e.target.value })} />
+        </label>
+        <label className="field">
+          <span>Company name</span>
+          <input defaultValue={settings.companyName} placeholder="Office Swarm" onBlur={(e) => e.target.value !== settings.companyName && set({ companyName: e.target.value })} />
+        </label>
+        <label className="field">
+          <span>Projects folder (new projects are created here)</span>
+          <input key={settings.projectsDir} defaultValue={settings.projectsDir} onBlur={(e) => e.target.value.trim() && e.target.value !== settings.projectsDir && set({ projectsDir: e.target.value })} />
+        </label>
+        <div className="row">
+          <button className="btn btn-small" onClick={() => set({ tutorialStep: 0 })}>
+            🧭 Replay the tour
+          </button>
+        </div>
         <h3>ℹ️ Environment</h3>
         <div className="small">
           GitHub: <b>{user ?? 'not signed in'}</b>
           {demo && ' (demo)'}
           <br />
-          Workspaces: <code>{workspaceRoot}</code>
+          Agent desks: <code>{workspaceRoot}</code>
         </div>
       </div>
     </div>
@@ -451,8 +616,10 @@ function SettingsTab() {
 
 export function ManagerConsole({ initialTab, initialRepo }: { initialTab?: ManagerTab; initialRepo?: string }) {
   const [tab, setTab] = useState<ManagerTab>(initialTab ?? 'floors');
+  const pending = useStore((s) => pendingRequests(s.requests).length);
   const tabs: [ManagerTab, string][] = [
     ['floors', '🏢 Floors & repos'],
+    ['ceo', `🧠 CEO & hiring${pending ? ` (${pending})` : ''}`],
     ['team', '👩‍💻 Team'],
     ['issues', '📝 Issues'],
     ['settings', '⚙️ Settings'],
@@ -468,6 +635,7 @@ export function ManagerConsole({ initialTab, initialRepo }: { initialTab?: Manag
       </div>
       <div className="tab-body">
         {tab === 'floors' && <FloorsTab />}
+        {tab === 'ceo' && <CeoTab />}
         {tab === 'team' && <TeamTab />}
         {tab === 'issues' && <IssuesTab initialRepo={initialRepo} />}
         {tab === 'settings' && <SettingsTab />}

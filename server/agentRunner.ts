@@ -1,8 +1,10 @@
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
+import type { OfficeTools } from './ceo.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
+// The CEO runs through here too, with the office tools instead of a shell.
 
 export interface SessionOptions {
   cwd: string;
@@ -17,6 +19,8 @@ export interface SessionOptions {
   /** JSON schema for a structured final answer (QA reports). */
   outputSchema?: Record<string, unknown>;
   resumeSessionId?: string;
+  /** The CEO's in-process MCP server (mcp__office__*). */
+  office?: OfficeTools;
 }
 
 export interface LogEntry {
@@ -40,6 +44,8 @@ export interface SessionCallbacks {
   sessionId(id: string): void;
   browserUrl(url: string): void;
   screenshot(data: Buffer, mime: string): void;
+  /** The final text of each turn: the reply to the prompt and to every message sent while it ran. */
+  turn?(text: string): void;
   finished(result: SessionResult): void;
 }
 
@@ -105,7 +111,7 @@ const QA_BLOCKED: { re: RegExp; why: string }[] = [
 
 function guardedCanUseTool(cwd: string, defaultBranchPush: RegExp, role: AgentRole): CanUseTool {
   return async (toolName, input, { blockedPath }) => {
-    if (toolName.startsWith('mcp__') && !toolName.startsWith('mcp__playwright__')) {
+    if (toolName.startsWith('mcp__') && !toolName.startsWith('mcp__playwright__') && !(role === 'ceo' && toolName.startsWith('mcp__office__'))) {
       return { behavior: 'deny', message: 'Only the Playwright browser tools are available to swarm agents.' };
     }
     if (WRITE_TOOLS.has(toolName)) {
@@ -184,7 +190,27 @@ function describeTool(cwd: string, name: string, input: Record<string, unknown>)
     const detail = input.url ?? input.element ?? input.text ?? '';
     return `🌐 ${action}${detail ? ` ${clip(String(detail), 120)}` : ''}`;
   }
+  if (name.startsWith('mcp__office__')) return describeOfficeTool(name.slice('mcp__office__'.length), input);
   return `${name}(${clip(JSON.stringify(input), 140)})`;
+}
+
+export function describeOfficeTool(action: string, input: Record<string, unknown>): string {
+  const floor = input.floor != null ? ` → floor ${input.floor}` : '';
+  switch (action) {
+    case 'company_status':
+      return '🏢 company_status';
+    case 'set_floor_profile':
+      return `🗂️ set_floor_profile${floor}${input.summary ? `: ${clip(String(input.summary), 90)}` : ''}`;
+    case 'update_job':
+      return `🪪 update_job ${input.title ? `"${clip(String(input.title), 60)}"` : String(input.agent_id ?? '')}`;
+    case 'propose_hire':
+      return `🤝 propose_hire ${input.role === 'qa' ? 'QA ' : ''}"${clip(String(input.title ?? ''), 60)}"${floor}`;
+    case 'propose_let_go':
+      return `👋 propose_let_go ${String(input.agent_id ?? '')}`;
+    case 'file_issue':
+      return `📝 file_issue "${clip(String(input.title ?? ''), 70)}"${floor}${input.specialty ? ` · ${input.specialty}` : ''}`;
+  }
+  return `🏢 ${action}(${clip(JSON.stringify(input), 120)})`;
 }
 
 function todoLines(input: Record<string, unknown>): LogEntry[] {
@@ -258,6 +284,10 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
     const args = ['-y', '@playwright/mcp@latest', '--headless', '--isolated'];
     mcpServers.playwright = process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', ...args] } : { command: 'npx', args };
   }
+  if (opts.office) mcpServers.office = opts.office.server;
+  // The CEO reads repositories and acts through the office tools; it never runs commands.
+  const disallowedTools = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+  if (opts.role === 'ceo') disallowedTools.push('Bash', 'PowerShell', 'NotebookEdit');
 
   const escaped = defaultBranch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const defaultBranchPush = new RegExp(`\\bgit\\s+push\\b[^\\n]*\\s(HEAD:)?(refs/heads/)?${escaped}(\\s|$)`);
@@ -276,7 +306,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
     settings: { disableClaudeAiConnectors: true },
     systemPrompt: { type: 'preset', preset: 'claude_code', append: opts.systemAppend },
     mcpServers,
-    disallowedTools: ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'],
+    disallowedTools,
     resume: opts.resumeSessionId,
     stderr: (data) => {
       const line = data.trim();
@@ -367,6 +397,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
         lastCost = msg.total_cost_usd;
         lastTurns = msg.num_turns;
         pendingTurns -= 1;
+        if (msg.subtype === 'success' && !msg.is_error && msg.result.trim()) cb.turn?.(msg.result.trim());
         if (pendingTurns <= 0) {
           input.close();
           const ok = msg.subtype === 'success' && !msg.is_error;

@@ -1,9 +1,11 @@
 import { useEffect, type ReactNode } from 'react';
 import { useStore } from '../store';
 import { requestLook } from '../world/Player';
+import { CEO_ID } from '../../../shared/types';
 import { ElevatorPanel } from './ElevatorPanel';
 import { KanbanView } from './KanbanView';
 import { ManagerConsole } from './ManagerConsole';
+import { Phone } from './Phone';
 import { TerminalView } from './TerminalView';
 
 export function closeOverlay(fromClick = false) {
@@ -49,7 +51,19 @@ function Help() {
           <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>E</kbd> interact with whatever the crosshair is on · <kbd>Esc</kbd> frees the mouse.
         </p>
         <h3>The building</h3>
-        <p>The ground floor is the lobby with the manager's office (glass room, back left). Every connected GitHub repo gets its own floor. Walk into the elevator in the middle of the south wall to travel.</p>
+        <p>
+          The ground floor is the lobby: your office is the glass room at the back left, the CEO's corner office is at the back right, and candidates wait on the chairs by the entrance. Every connected GitHub repo gets its own
+          floor. Walk into the elevator in the middle of the south wall to travel.
+        </p>
+        <h3>Your phone</h3>
+        <p>
+          Press <kbd>P</kbd> anywhere to pull out your phone. Text the CEO, approve or decline the people they want to hire, and see every project at a glance. The red badge counts decisions and messages waiting for you.
+        </p>
+        <h3>The CEO</h3>
+        <p>
+          The CEO studies every new floor, writes its QA brief, gives each agent a job that fits the project, turns your project briefs into issues and proposes hires. Hires wait for your approval unless you switch hiring to
+          auto in the manager's console.
+        </p>
         <h3>Your team</h3>
         <p>
           Each agent is its own Claude Code session (Claude Agent SDK) working in its own git worktree. Walk up behind them to read their laptop, or press <kbd>E</kbd> on a desk to open the full terminal, send them instructions, stop them or hand them another issue. Aim at an empty desk and press <kbd>E</kbd> to hire.
@@ -74,7 +88,9 @@ export function Overlays() {
   if (!overlay) return null;
   switch (overlay.kind) {
     case 'terminal':
-      return <TerminalView agentId={overlay.agentId} />;
+      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" /> : <TerminalView agentId={overlay.agentId} />;
+    case 'phone':
+      return <Phone tab={overlay.tab} requestId={overlay.requestId} />;
     case 'kanban':
       return <KanbanView repoId={overlay.repoId} />;
     case 'elevator':

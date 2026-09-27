@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { api } from '../api';
 import { agentsOnRepo, kanbanFor, useStore, type Agent, type KanbanCard } from '../store';
+import { confirmDialog } from './Confirm';
 import { Panel } from './Overlays';
 
 function AgentChip({ agent }: { agent?: Agent }) {
@@ -98,12 +99,19 @@ export function KanbanView({ repoId }: { repoId: string }) {
   };
   const devs = agents.filter((a) => a.role === 'dev');
   const free = devs.filter((a) => a.status === 'idle' || a.status === 'done' || a.status === 'stopped' || a.status === 'error');
-  const merge = (c: KanbanCard) => {
-    const msg =
-      c.qa?.status === 'passed'
-        ? `Squash-merge PR #${c.number} "${c.title}" into ${repo.defaultBranch}?`
-        : `PR #${c.number} has NOT passed QA. Merge it into ${repo.defaultBranch} anyway?`;
-    if (confirm(msg)) void act(c.key, () => api.mergePull(repo.id, c.number));
+  const merge = async (c: KanbanCard) => {
+    const passed = c.qa?.status === 'passed';
+    const ok = await confirmDialog(
+      passed
+        ? { icon: '🎉', title: `Merge PR #${c.number}?`, body: `“${c.title}” passed QA. It will be squash-merged into ${repo.defaultBranch}.`, confirm: 'Squash & merge' }
+        : {
+            tone: 'warn',
+            title: `Merge PR #${c.number} without QA?`,
+            body: `“${c.title}” has not passed QA yet. Merge it into ${repo.defaultBranch} anyway?`,
+            confirm: 'Merge anyway',
+          },
+    );
+    if (ok) void act(c.key, () => api.mergePull(repo.id, c.number));
   };
   const terminalButton = (c: KanbanCard) =>
     c.agent && (
@@ -255,8 +263,9 @@ export function KanbanView({ repoId }: { repoId: string }) {
                 <button
                   className="btn btn-small btn-ghost"
                   disabled={pending === c.key}
-                  onClick={() => {
-                    if (confirm(`Close PR #${c.number} without merging?`)) void act(c.key, () => api.closePull(repo.id, c.number));
+                  onClick={async () => {
+                    const ok = await confirmDialog({ tone: 'danger', title: `Close PR #${c.number}?`, body: `“${c.title}” will be closed without merging. The branch stays on GitHub.`, confirm: 'Close PR' });
+                    if (ok) void act(c.key, () => api.closePull(repo.id, c.number));
                   }}
                 >
                   Close

@@ -36,11 +36,43 @@ app.get('/api/state', route(() => swarm.snapshot()));
 
 app.get('/api/github/repos', route((req) => swarm.listGithubRepos(str(req.query.owner) || undefined)));
 
-app.post('/api/repos', route((req) => swarm.connectRepo(str(req.body.fullName).trim())));
+// What happens once a project moves in: the CEO's brief, and whether work starts on its own.
+const floorOptions = (req: Request) => ({ mission: str(req.body.mission), autoAssign: req.body.autoAssign === true });
+
+app.post('/api/repos', route((req) => swarm.connectRepo(str(req.body.fullName).trim(), floorOptions(req))));
+
+// Your projects folder
+app.get('/api/folders', route((req) => swarm.listProjectFolders(str(req.query.dir) || undefined)));
+app.post('/api/folders/connect', route((req) => swarm.connectFolder(str(req.body.path), floorOptions(req))));
+app.post(
+  '/api/folders/publish',
+  route((req) =>
+    swarm.publishFolder(str(req.body.path), {
+      ...floorOptions(req),
+      name: str(req.body.name) || undefined,
+      visibility: req.body.visibility === 'public' ? 'public' : 'private',
+      description: str(req.body.description),
+    }),
+  ),
+);
+app.post(
+  '/api/setup',
+  route((req) =>
+    swarm.setup({
+      managerName: str(req.body.managerName),
+      companyName: str(req.body.companyName),
+      hiring: str(req.body.hiring),
+      ceoName: str(req.body.ceoName),
+      ceoLook: str(req.body.ceoLook),
+      ceoColor: str(req.body.ceoColor),
+    }),
+  ),
+);
 app.post(
   '/api/repos/new',
   route((req) =>
     swarm.createRepo(str(req.body.name).trim(), {
+      ...floorOptions(req),
       description: str(req.body.description),
       visibility: req.body.visibility === 'public' ? 'public' : 'private',
       owner: str(req.body.owner).trim() || undefined,
@@ -52,12 +84,30 @@ app.delete('/api/repos/:repo', route((req) => swarm.disconnectRepo(repoId(req)))
 app.post('/api/repos/:repo/sync', route((req) => swarm.syncRepo(repoId(req))));
 app.post(
   '/api/repos/:repo/issues',
-  route(async (req) => ({ number: await swarm.createIssue(repoId(req), str(req.body.title), str(req.body.body), str(req.body.assignTo) || undefined) })),
+  route(async (req) => ({
+    number: await swarm.createIssue(repoId(req), str(req.body.title), str(req.body.body), str(req.body.assignTo) || undefined, str(req.body.specialty) || undefined),
+  })),
 );
+app.post('/api/repos/:repo/plan', route((req) => swarm.planFloor(repoId(req), typeof req.body?.mission === 'string' ? req.body.mission : undefined)));
+app.post('/api/repos/:repo/onboard', route((req) => swarm.onboardFloor(repoId(req))));
 app.post('/api/repos/:repo/pulls/:n/merge', route((req) => swarm.mergePull(repoId(req), num(req.params.n), req.body?.method ?? 'squash')));
 app.post('/api/repos/:repo/pulls/:n/close', route((req) => swarm.closePull(repoId(req), num(req.params.n))));
 app.post('/api/repos/:repo/pulls/:n/qa', route((req) => swarm.sendToQa(repoId(req), num(req.params.n))));
-app.post('/api/repos/:repo/agents', route((req) => swarm.hireAgent(repoId(req), { name: str(req.body.name), model: str(req.body.model), effort: str(req.body.effort), role: str(req.body.role), look: str(req.body.look) })));
+app.post(
+  '/api/repos/:repo/agents',
+  route((req) =>
+    swarm.hireAgent(repoId(req), {
+      name: str(req.body.name),
+      model: str(req.body.model),
+      effort: str(req.body.effort),
+      role: str(req.body.role),
+      look: str(req.body.look),
+      title: str(req.body.title),
+      specialty: str(req.body.specialty),
+      brief: str(req.body.brief),
+    }),
+  ),
+);
 
 app.patch('/api/agents/:id', route((req) => swarm.updateAgent(String(req.params.id), req.body ?? {})));
 app.delete('/api/agents/:id', route((req) => swarm.fireAgent(String(req.params.id))));
@@ -74,6 +124,16 @@ app.get('/api/agents/:id/screen', (req, res) => {
 });
 
 app.patch('/api/settings', route((req) => swarm.updateSettings(req.body ?? {})));
+
+// The CEO and the manager's phone
+app.post('/api/ceo/message', route((req) => swarm.messageCeo(str(req.body.text))));
+app.post('/api/ceo/review', route(() => swarm.requestReview()));
+app.post('/api/phone/read', route((req) => swarm.markPhoneRead(Number(req.body?.at) || Date.now())));
+app.post(
+  '/api/requests/:id/approve',
+  route((req) => swarm.approveRequest(String(req.params.id), { name: str(req.body?.name) || undefined, model: typeof req.body?.model === 'string' ? req.body.model : undefined, effort: typeof req.body?.effort === 'string' ? req.body.effort : undefined })),
+);
+app.post('/api/requests/:id/reject', route((req) => swarm.rejectRequest(String(req.params.id), str(req.body?.note))));
 
 // Serve the built client when running `npm start` after `npm run build`.
 const dist = path.resolve(import.meta.dirname, '../dist');

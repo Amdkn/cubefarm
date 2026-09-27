@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { isBusy, kanbanFor, agentsOnRepo, useStore } from '../store';
+import { confirmDialog } from './Confirm';
 import { closeOverlay, Panel } from './Overlays';
 import { toolVerb } from '../world/draw';
 
@@ -85,7 +86,10 @@ export function TerminalView({ agentId }: { agentId: string }) {
             {agent.name[0]}
           </span>
           <span>{agent.name}</span>
-          {isQa && <span className="chip">🔍 QA tester</span>}
+          <span className="chip" title={agent.brief || undefined}>
+            {isQa ? '🔍' : '💻'} {agent.title || (isQa ? 'QA tester' : 'Developer')}
+            {agent.specialty ? ` · 🎯 ${agent.specialty}` : ''}
+          </span>
           <StatusPill status={agent.status} />
           {working && agent.currentTool && <span className="muted small">{toolVerb(agent.currentTool)}…</span>}
         </div>
@@ -132,6 +136,12 @@ export function TerminalView({ agentId }: { agentId: string }) {
         {agent.costUsd > 0 && <span className="muted" title="API-equivalent cost reported by Claude Code; subscription usage is billed by plan">≈${agent.costUsd.toFixed(2)}</span>}
       </div>
       {agent.lastError && agent.status !== 'working' && <div className="term-error">⚠️ {agent.lastError}</div>}
+      {agent.brief && (
+        <details className="small job-brief">
+          <summary>Job description{agent.hiredBy === 'ceo' ? ' (from the CEO)' : ''}</summary>
+          <p>{agent.brief}</p>
+        </details>
+      )}
 
       <div className={`term-split ${agent.hasScreenshot ? 'term-split-2' : ''}`}>
         <div
@@ -225,8 +235,15 @@ export function TerminalView({ agentId }: { agentId: string }) {
           className="btn btn-ghost"
           disabled={busy}
           onClick={() => {
-            if (!confirm(`Let ${agent.name} go? Their worktree will be removed (pushed branches stay on GitHub).`)) return;
             void run(async () => {
+              const ok = await confirmDialog({
+                tone: 'danger',
+                icon: '👋',
+                title: `Let ${agent.name} go?`,
+                body: 'Their worktree is removed. Branches they pushed stay on GitHub.',
+                confirm: `Let ${agent.name} go`,
+              });
+              if (!ok) return;
               await api.fireAgent(agent.id);
               closeOverlay();
             });
