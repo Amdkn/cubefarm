@@ -322,6 +322,7 @@ export function createDemoBackend(): Backend {
       return dir;
     },
     removeDesk: async () => undefined,
+    releaseDesk: async () => undefined,
     startSession: (opts, cb) => fakeSession(opts, cb, deskRepo.get(opts.cwd) ?? [...repos.keys()][0]),
   };
 }

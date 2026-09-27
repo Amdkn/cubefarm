@@ -25,6 +25,8 @@ export interface Backend {
   deskDir(fullName: string, agentSlug: string): string;
   prepareDesk(fullName: string, base: workspace.DeskBase, agentSlug: string, branch: string): Promise<string>;
   removeDesk(fullName: string, agentSlug: string): Promise<void>;
+  /** Stop processes an agent left running (dev servers on its port, anything started in its desk). */
+  releaseDesk(fullName: string, agentSlug: string, port: number): Promise<void>;
   startSession(opts: SessionOptions, cb: SessionCallbacks, defaultBranch: string): SessionHandle;
 }
 
@@ -49,5 +51,6 @@ export const realBackend: Backend = {
   deskDir: workspace.deskDir,
   prepareDesk: workspace.prepareDesk,
   removeDesk: workspace.removeDesk,
+  releaseDesk: workspace.releaseDesk,
   startSession,
 };

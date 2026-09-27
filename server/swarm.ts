@@ -335,6 +335,13 @@ export class Swarm {
 
     for (const r of this.state.repos) void this.cloneRepo(r.id);
     await Promise.all(this.state.repos.map((r) => this.syncRepo(r.id)));
+    // Nothing is running yet, so anything still alive in a desk is left over from before the restart.
+    await Promise.all(
+      this.state.agents.map((a) => {
+        const repo = this.state.repos.find((r) => r.id === a.repoId);
+        return repo ? this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined) : undefined;
+      }),
+    );
     this.recover(interrupted);
     setInterval(() => this.state.repos.forEach((r, i) => setTimeout(() => void this.syncRepo(r.id), i * 1500)), SYNC_INTERVAL_MS);
     setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
@@ -797,7 +804,13 @@ export class Swarm {
       if (q.devAgentId === null && q.status === 'fixing') this.setQa(q, { status: 'failed' });
     }
     const repo = this.state.repos.find((r) => r.id === a.repoId);
-    if (repo) void this.backend.removeDesk(repo.fullName, this.agentSlug(a)).catch(() => undefined);
+    if (repo) {
+      const slug = this.agentSlug(a);
+      void this.backend
+        .releaseDesk(repo.fullName, slug, this.port(a))
+        .then(() => this.backend.removeDesk(repo.fullName, slug))
+        .catch(() => undefined);
+    }
     this.state.agents = this.state.agents.filter((x) => x.id !== id);
     this.agentRt.delete(id);
     this.save();
@@ -921,6 +934,7 @@ export class Swarm {
   private async prepare(a: PersistedAgent, repo: PersistedRepo, base: { pr?: number }, branch: string): Promise<string | null> {
     try {
       if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
+      await this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
       const cwd = await this.backend.prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch);
       return a.status === 'preparing' ? cwd : null; // null: stopped or fired while preparing
     } catch (err) {
@@ -1024,6 +1038,8 @@ export class Swarm {
     a.endedAt = Date.now();
     a.costUsd += result.costUsd;
     a.turns += result.turns;
+    // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
+    void this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
 
     if (a.task === 'qa') await this.onQaFinished(a, repo, result);
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
