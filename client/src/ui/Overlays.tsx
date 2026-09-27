@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from 'react';
 import { useStore } from '../store';
 import { SENSITIVITY_MAX, SENSITIVITY_MIN, useLookPrefs } from '../world/look';
 import { CEO_ID } from '../../../shared/types';
+import { AppViewer } from './AppViewer';
 import { ElevatorPanel } from './ElevatorPanel';
 import { KanbanView } from './KanbanView';
 import { ManagerConsole } from './ManagerConsole';
@@ -14,7 +15,21 @@ export function closeOverlay() {
   useStore.getState().openOverlay(null);
 }
 
-export function Panel({ title, children, wide, accent, onClose }: { title: ReactNode; children: ReactNode; wide?: boolean; accent?: string; onClose?: () => void }) {
+export function Panel({
+  title,
+  children,
+  wide,
+  accent,
+  className,
+  onClose,
+}: {
+  title: ReactNode;
+  children: ReactNode;
+  wide?: boolean;
+  accent?: string;
+  className?: string;
+  onClose?: () => void;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -27,7 +42,7 @@ export function Panel({ title, children, wide, accent, onClose }: { title: React
   }, [onClose]);
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && closeOverlay()}>
-      <div className={`panel ${wide ? 'panel-wide' : ''}`} style={{ ['--accent' as string]: accent ?? '#ff8a5b' }}>
+      <div className={`panel ${wide ? 'panel-wide' : ''} ${className ?? ''}`} style={{ ['--accent' as string]: accent ?? '#ff8a5b' }}>
         <div className="panel-head">
           <div className="panel-title">{title}</div>
           <button className="panel-x" onClick={() => (onClose ? onClose() : closeOverlay())} aria-label="Close">
@@ -121,6 +136,8 @@ export function Overlays() {
       return <Phone tab={overlay.tab} requestId={overlay.requestId} />;
     case 'kanban':
       return <KanbanView repoId={overlay.repoId} />;
+    case 'app':
+      return <AppViewer repoId={overlay.repoId} />;
     case 'elevator':
       return <ElevatorPanel />;
     case 'manager':
