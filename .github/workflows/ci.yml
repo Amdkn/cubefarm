@@ -39,3 +39,5 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      # The npm package as users get it: packed, installed into an empty folder and booted in demo mode.
+      - run: node scripts/smoke-package.mjs

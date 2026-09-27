@@ -1,14 +1,15 @@
-# Office Swarm
+# cubefarm
 
 A cartoon first-person 3D office (React Three Fiber) over a Node orchestrator that runs one Claude Code session
 (Claude Agent SDK) per developer, QA tester and the CEO, each in its own git worktree, working through GitHub issues.
-This is the app the company runs on: a live office is running from this repo right now. README.md has the product tour.
+This is the app the company runs on: a live office is running from this repo right now. README.md is the quick start; docs/how-it-works.md and CONTRIBUTING.md have the details.
+It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swarm.
 
 ## SAFETY (read first)
 
 - The live office runs from `C:\Projects\office-swarm` on this machine, on ports 4317 (server) and 5317 (Vite),
-  with its state in `~/.office-swarm`. Never edit or run anything there, never read or write `~/.office-swarm`
-  directly, and never use ports 4317 or 5317.
+  with its state in `~/.cubefarm`. Never edit or run anything there, never read or write `~/.cubefarm` directly, and
+  never use ports 4317 or 5317.
 - Test only in demo mode (fake GitHub, fake agents, no Claude usage), with an isolated `SWARM_HOME` and your reserved
   `SWARM_PORT` (from your job instructions):
 
@@ -23,8 +24,8 @@ This is the app the company runs on: a live office is running from this repo rig
   ```
   Then open `http://localhost:<your port>` (the server serves the built `dist/`). The startup banner must say
   `DEMO MODE` and print a `state:` path inside your `SWARM_HOME`. Stop it when done; don't commit `.swarm-home`.
-- Never real mode (no `--demo`), and never `npm run dev` / `npm run demo` / `npm start`: they default to 4317,
-  and `dev`/`demo` hardcode Vite's 5317.
+- Never real mode (no `--demo`), and never `npm run dev` / `npm run demo` / `npm start` / `npx cubefarm`: they default
+  to 4317, and `dev`/`demo` hardcode Vite's 5317.
 - Guardrails never loosen: guarded mode refuses writes outside the worktree, force-pushes, pushes to the default
   branch and `gh pr merge`; `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
@@ -34,18 +35,20 @@ This is the app the company runs on: a live office is running from this repo rig
 | --- | --- |
 | `npm run typecheck` | `tsc --noEmit` over client, server, shared and the configs |
 | `npm test` | Vitest, once (`npm run test:watch` to re-run on edits) |
-| `npm run build` | typecheck, then `vite build` to `dist/` |
+| `npm run build` | typecheck, `vite build` to `dist/`, then the server bundled into `dist-server/` (`scripts/build-server.mjs`) |
+| `node scripts/smoke-package.mjs` | after a build: packs the npm package, installs it into a temp folder and boots its demo |
 | `node --import tsx server/index.ts --demo` | a demo office (see SAFETY for the env it needs) |
 
 CI (`.github/workflows/ci.yml`): Node 24 on `ubuntu-latest` and `windows-latest`, `npm ci` → `typecheck` → `test` →
-`build`, for every PR and push to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`. All three must pass locally
+`build` → package smoke test, for every PR and push to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`. All three must pass locally
 before you open a PR.
 
 ## Code map
 
-Server (`server/`, Node + Express 5 + ws, run by tsx; no compile step):
+Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bundles it into `dist-server/` for npm):
 - `index.ts`: entry; picks the real or demo backend, REST routes under `/api`, the `/ws` websocket, serves `dist/`, shutdown.
-- `config.ts`: `SWARM_PORT` (default 4317), `SWARM_HOME` (default `~/.office-swarm`), `--demo`, state file, intervals.
+- `config.ts`: `SWARM_PORT` (default 4317), `SWARM_HOME` (default `~/.cubefarm`), `--demo`, state file, intervals,
+  the default projects folder.
 - `swarm.ts`: the orchestrator. Floors, agents, scheduling/auto-assign, dev → QA → fix → merge loop, dev and QA
   prompts, CEO job queue, phone messages, persistence (`state.json` / `demo-state.json`), websocket fan-out.
 - `agentRunner.ts`: one Agent SDK session; options, guarded permission checks, env stripping, Playwright MCP,
@@ -60,6 +63,9 @@ Server (`server/`, Node + Express 5 + ws, run by tsx; no compile step):
 - `previews.ts`: one preview per floor: ports (6300 + floor), statuses, config validation.
 - `previewRunner.ts`: checks out, installs and runs a floor's app in its preview worktree; kills the process tree.
 - `httpError.ts`: `HttpError(status, message)`.
+
+The `cubefarm` command (`bin/cubefarm.js`, plain JS): checks Node/git/gh/Claude login, starts `dist-server/index.js`,
+opens the browser; `login` and `doctor` subcommands.
 
 Shared (`shared/`, imported by both sides):
 - `types.ts`: the REST/websocket contract (`WorldSnapshot`, `ServerEvent`, views, settings).
@@ -101,7 +107,7 @@ Client (`client/`, Vite root; React 19, R3F, drei, zustand):
 - Vitest, `*.test.ts` next to the code, anywhere under `client/`, `server/` or `shared/`
   (e.g. `shared/issues.test.ts`, `client/src/world/layout.test.ts`, `server/ceo.test.ts`). Config: `vitest.config.ts`.
 - Test pure functions directly; extract logic into pure helpers rather than mocking. No network, no `gh`, no Claude
-  sessions, no real `~/.office-swarm`: `npm test` already points `SWARM_HOME` at a temp folder and `SWARM_PORT` at 0.
+  sessions, no real `~/.cubefarm`: `npm test` already points `SWARM_HOME` at a temp folder and `SWARM_PORT` at 0.
 - Must pass on both CI runners (ubuntu + windows): don't hardcode `/` or `\` in expected paths.
 
 ## Pull requests

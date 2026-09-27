@@ -79,7 +79,7 @@ export interface SavedView {
   yaw: number;
   pitch: number;
 }
-const VIEW_KEY = 'office-swarm:view';
+const VIEW_KEY = 'cubefarm:view';
 
 export function loadView(): SavedView | null {
   try {

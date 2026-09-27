@@ -8,7 +8,7 @@ export default defineConfig({
     root: '.',
     include: ['{client,server,shared}/**/*.test.{ts,tsx}'],
     environment: 'node',
-    // Anything a test imports must never see the live office's state (~/.office-swarm) or its ports.
-    env: { SWARM_HOME: path.join(os.tmpdir(), `office-swarm-vitest-${process.pid}`), SWARM_PORT: '0' },
+    // Anything a test imports must never see the live office's state (~/.cubefarm) or its ports.
+    env: { SWARM_HOME: path.join(os.tmpdir(), `cubefarm-vitest-${process.pid}`), SWARM_PORT: '0' },
   },
 });

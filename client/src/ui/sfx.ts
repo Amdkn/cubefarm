@@ -7,7 +7,7 @@ export interface AudioPrefs {
   muted: boolean;
 }
 
-const PREFS_KEY = 'office-swarm:audio';
+const PREFS_KEY = 'cubefarm:audio';
 
 function loadPrefs(): AudioPrefs {
   try {

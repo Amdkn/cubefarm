@@ -146,7 +146,7 @@ app.post(
 );
 app.post('/api/requests/:id/reject', route((req) => swarm.rejectRequest(String(req.params.id), str(req.body?.note))));
 
-// Serve the built client when running `npm start` after `npm run build`.
+// Serve the built client: the published package, or `npm start` after `npm run build`.
 const dist = path.resolve(import.meta.dirname, '../dist');
 if (fs.existsSync(dist)) {
   app.use(express.static(dist));
@@ -167,7 +167,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws) => swarm.addClient(ws));
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n  🏢 Office Swarm server on http://localhost:${PORT}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
+  console.log(`\n  🏢 cubefarm on http://localhost:${PORT}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
   console.log(`     state: ${STATE_FILE}`);
   console.log(`     workspaces: ${WORKSPACE_ROOT}\n`);
 });

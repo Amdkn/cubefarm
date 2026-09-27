@@ -96,7 +96,7 @@ export function SetupWizard() {
         {step === 0 && (
           <>
             <div className="start-logo">✻</div>
-            <h1>Office Swarm</h1>
+            <h1>cubefarm</h1>
             <p className="start-tag">Your own cartoon software company, staffed by Claude Code agents.</p>
             <ul className="start-list">
               <li>🏢 Every project gets its own floor, with developers and a QA lab working through its GitHub issues.</li>

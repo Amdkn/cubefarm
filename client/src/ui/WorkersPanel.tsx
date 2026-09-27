@@ -8,7 +8,7 @@ import { CEO_ID, type LogLine, type RepoView } from '../../../shared/types';
 
 const SHOWN: LogLine['kind'][] = ['tool', 'text', 'thinking', 'error', 'done', 'manager'];
 const isWorking = (a: Agent) => a.status === 'working' || a.status === 'preparing';
-const STORAGE_KEY = 'office-swarm:workers';
+const STORAGE_KEY = 'cubefarm:workers';
 
 /** The latest line worth showing, cleaned of the terminal's bullets. */
 function latest(log: LogLine[]): { text: string; kind: LogLine['kind']; t: number } | null {

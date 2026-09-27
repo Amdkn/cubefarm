@@ -103,7 +103,7 @@ export interface LookPrefs {
   sensitivity: number;
   invertY: boolean;
 }
-const PREFS_KEY = 'office-swarm:look';
+const PREFS_KEY = 'cubefarm:look';
 const DEFAULT_PREFS: LookPrefs = { sensitivity: 1, invertY: false };
 
 const clampSensitivity = (v: number) => Math.min(SENSITIVITY_MAX, Math.max(SENSITIVITY_MIN, v));

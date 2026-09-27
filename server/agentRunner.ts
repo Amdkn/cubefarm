@@ -2,6 +2,7 @@ import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
 import type { OfficeTools } from './ceo.ts';
+import { VERSION } from './config.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
 // The CEO runs through here too, with the office tools instead of a shell.
@@ -125,7 +126,7 @@ function guardedCanUseTool(cwd: string, defaultBranchPush: RegExp, role: AgentRo
     if (toolName === 'Bash' || toolName === 'PowerShell') {
       const cmd = String(input.command ?? '');
       for (const rule of role === 'qa' ? [...BLOCKED_COMMANDS, ...QA_BLOCKED] : BLOCKED_COMMANDS) {
-        if (rule.re.test(cmd)) return { behavior: 'deny', message: `Blocked by Office Swarm: ${rule.why}.` };
+        if (rule.re.test(cmd)) return { behavior: 'deny', message: `Blocked by cubefarm: ${rule.why}.` };
       }
       if (defaultBranchPush.test(cmd)) {
         return { behavior: 'deny', message: 'Push your own branch and open a PR; pushing to the default branch is not allowed.' };
@@ -281,7 +282,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
     if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
     env[k] = v;
   }
-  env.CLAUDE_AGENT_SDK_CLIENT_APP = 'office-swarm/0.1.0';
+  env.CLAUDE_AGENT_SDK_CLIENT_APP = `cubefarm/${VERSION}`;
 
   const mcpServers: Options['mcpServers'] = {};
   if (opts.browserTesting) {

@@ -5,7 +5,7 @@ import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
-import { HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
+import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, jobLabel, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools } from './ceo.ts';
 import { HttpError } from './httpError.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
@@ -206,8 +206,7 @@ const CEO_EFFORT: EffortLevel = 'xhigh';
 const CEO_NAME = 'Morgan';
 // The CEO's own folder: its notes about the company live here. Repos are read through their clones.
 const CEO_DIR = path.join(HOME_DIR, 'ceo');
-// Your projects most likely live next to this app (e.g. C:\Projects\office-swarm → C:\Projects).
-const DEFAULT_PROJECTS_DIR = path.resolve(import.meta.dirname, '..', '..');
+const DEFAULT_PROJECTS_DIR = defaultProjectsDir(path.resolve(import.meta.dirname, '..'));
 const MAX_PENDING_REQUESTS = 8;
 const MAX_ISSUES_PER_JOB = 12;
 const KEEP_MESSAGES = 200;
@@ -1358,7 +1357,7 @@ export class Swarm {
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.backend.mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
-      `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("Office Swarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
+      `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("cubefarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
       `Every pull request is reviewed and tested by a QA teammate. ${repo.autoMerge ? "Once they sign off and GitHub's checks pass, the office merges it by itself" : 'Once they sign off, the manager merges it'}. If they find problems, or checks fail, or it conflicts with the default branch, you will get the details; fix them on the same branch.`,
       a.brief ? `\nYour job description:\n${a.brief}` : '',
       '',
@@ -1657,7 +1656,7 @@ export class Swarm {
 
   private buildQaSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, pr: PrDetails) {
     return [
-      `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("Office Swarm"). Developers open pull requests; you review and independently verify each one before it is merged. Your sign-off is the review: ${repo.autoMerge ? "on this floor a PR you pass merges by itself as soon as GitHub's checks are green, so nobody else reads the code after you. " : ''}Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
+      `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("cubefarm"). Developers open pull requests; you review and independently verify each one before it is merged. Your sign-off is the review: ${repo.autoMerge ? "on this floor a PR you pass merges by itself as soon as GitHub's checks are green, so nobody else reads the code after you. " : ''}Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
       ...(a.brief ? ['', `Your job description:\n${a.brief}`] : []),
       ...(a.role === 'dev' ? ['', "You're a developer covering for the QA lab while its testers are busy. You didn't write this pull request: test it as an independent QA engineer would."] : []),
       '',
@@ -1828,7 +1827,7 @@ export class Swarm {
     const dev = rec.devAgentId ? this.state.agents.find((x) => x.id === rec.devAgentId) : null;
     const lines = [
       `## 🔍 QA report: ${pass ? '✅ Passed' : '❌ Failed'}`,
-      `**Tester:** ${a.name} (Office Swarm QA agent) · **Round:** ${rec.round}${dev ? ` · **Author:** ${dev.name}` : ''}`,
+      `**Tester:** ${a.name} (cubefarm QA agent) · **Round:** ${rec.round}${dev ? ` · **Author:** ${dev.name}` : ''}`,
       '',
       report.summary,
       '',
@@ -1843,7 +1842,7 @@ export class Swarm {
     if (images.length) lines.push('', '### 📸 Evidence', '', ...images.flatMap((img) => [img, '']));
     else lines.push('', '_No browser screenshots were taken in this round._');
     const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
-    lines.push('', `<sub>Posted by Office Swarm · ${pass ? merge : rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes'}</sub>`);
+    lines.push('', `<sub>Posted by cubefarm · ${pass ? merge : rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes'}</sub>`);
     return lines.join('\n');
   }
 
@@ -2774,7 +2773,7 @@ export class Swarm {
     const title = String(x.title ?? '').trim().slice(0, 120);
     if (!title) throw new Error('An issue needs a title.');
     const slug = specialtySlug(x.specialty);
-    const body = `${String(x.body ?? '').trim()}\n\n---\n_Filed by ${this.ceo().name}, the Office Swarm CEO._`;
+    const body = `${String(x.body ?? '').trim()}\n\n---\n_Filed by ${this.ceo().name}, the cubefarm CEO._`;
     const n = await this.backend.createIssue(repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
     this.ceoIssues.filed++;
     this.ceoIssues.repos.add(repo.id);

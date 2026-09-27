@@ -1,38 +1,60 @@
 {
-  "name": "office-swarm",
+  "name": "cubefarm",
   "version": "0.1.0",
-  "private": true,
+  "description": "A cartoon 3D office where a team of Claude Code agents works through your GitHub issues.",
+  "keywords": [
+    "claude-code",
+    "claude-agent-sdk",
+    "ai-agents",
+    "coding-agents",
+    "github-issues",
+    "automation",
+    "threejs"
+  ],
+  "homepage": "https://github.com/leonvanzyl/cubefarm#readme",
+  "bugs": "https://github.com/leonvanzyl/cubefarm/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonvanzyl/cubefarm.git"
+  },
+  "license": "MIT",
+  "author": "Leon van Zyl",
   "type": "module",
-  "description": "A cartoon 3D office where a swarm of Claude Code agents works through your GitHub issues.",
+  "bin": {
+    "cubefarm": "bin/cubefarm.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "dist-server"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "concurrently -k -n server,client -c magenta,cyan \"npm:dev:server\" \"npm:dev:client\"",
     "demo": "concurrently -k -n server,client -c magenta,cyan \"npm:demo:server\" \"npm:dev:client\"",
     "dev:server": "node scripts/dev-server.mjs",
     "demo:server": "node scripts/dev-server.mjs --demo",
     "dev:client": "vite",
-    "build": "tsc --noEmit -p tsconfig.json && vite build",
-    "start": "node --import tsx server/index.ts",
+    "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/build-server.mjs",
+    "start": "node bin/cubefarm.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.283",
+    "express": "^5.2.1",
+    "ws": "^8.22.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
     "@dimforge/rapier3d-compat": "0.19.2",
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",
     "@react-three/rapier": "^2.2.0",
-    "express": "^5.2.1",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "react-markdown": "^10.1.0",
-    "remark-breaks": "^4.0.0",
-    "remark-gfm": "^4.0.1",
-    "three": "^0.186.1",
-    "ws": "^8.22.0",
-    "zustand": "^5.0.15"
-  },
-  "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.3",
     "@types/react": "^19.3.0",
@@ -41,9 +63,17 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^10.0.5",
+    "esbuild": "^0.28.2",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "three": "^0.186.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.2",
+    "zustand": "^5.0.15"
   }
 }

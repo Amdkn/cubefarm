@@ -620,7 +620,7 @@ function SettingsTab() {
         </label>
         <label className="field">
           <span>Company name</span>
-          <input defaultValue={settings.companyName} placeholder="Office Swarm" onBlur={(e) => e.target.value !== settings.companyName && set({ companyName: e.target.value })} />
+          <input defaultValue={settings.companyName} placeholder="cubefarm" onBlur={(e) => e.target.value !== settings.companyName && set({ companyName: e.target.value })} />
         </label>
         <label className="field">
           <span>Projects folder (new projects are created here)</span>

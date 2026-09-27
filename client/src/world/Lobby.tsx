@@ -443,7 +443,7 @@ export function Lobby() {
         px={[1400, 320]}
         draw={(ctx) =>
           drawSign(ctx, 1400, 320, [
-            { text: `✻ ${company || 'Office Swarm'}`, size: 120 },
+            { text: `✻ ${company || 'cubefarm'}`, size: 120 },
             { text: company ? 'powered by a Claude Code agent team' : 'a Claude Code agent team', size: 48, weight: 500 },
           ], ACCENT)
         }

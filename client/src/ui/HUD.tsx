@@ -52,7 +52,7 @@ export function HUD() {
       <div className="hud-floor" style={{ ['--accent' as string]: repo?.color ?? '#ff8a5b' }}>
         <div className="floor-num">{repo ? repo.floor : 'G'}</div>
         <div>
-          <div className="floor-name">{repo ? repo.fullName : `${settings.companyName || 'Office Swarm'} · Lobby`}</div>
+          <div className="floor-name">{repo ? repo.fullName : `${settings.companyName || 'cubefarm'} · Lobby`}</div>
           <div className="floor-sub">
             {repo
               ? `${floorAgents.length} agents · ${floorAgents.filter((a) => a.status === 'working' || a.status === 'preparing').length} working · ${floorQa.filter((q) => q.status !== 'passed').length} in QA · ${floorQa.filter((q) => q.status === 'passed').length} ready to merge`

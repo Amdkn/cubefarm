@@ -13,7 +13,7 @@ export const PREVIEW_SLUG = 'preview';
 export const PREVIEW_BRANCH = 'swarm-preview';
 /** Scratch folder inside the preview worktree, offered to commands and env as {tmp}; excluded from git status. */
 export const PREVIEW_TMP = '.preview-tmp';
-const INSTALL_MARKER = '.office-swarm-preview-install';
+const INSTALL_MARKER = '.cubefarm-preview-install';
 const START_TIMEOUT_MS = 3 * 60_000;
 const INSTALL_TIMEOUT_MS = 15 * 60_000;
 

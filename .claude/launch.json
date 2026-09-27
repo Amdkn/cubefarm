@@ -2,13 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "office-swarm-demo",
+      "name": "cubefarm-demo",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "demo"],
       "port": 5317
     },
     {
-      "name": "office-swarm",
+      "name": "cubefarm",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
       "port": 5317
