@@ -357,15 +357,21 @@ export class Swarm {
     messages: [],
     phoneReadAt: 0,
   };
-  private office: OfficeTools = createOfficeTools({
-    companyStatus: () => this.companyStatus(),
-    agentDetail: (a) => this.agentDetail(a),
-    setFloorProfile: (a) => this.setFloorProfile(a),
-    updateJob: (a) => this.updateJob(a),
-    proposeHire: (a) => this.proposeHire(a),
-    proposeLetGo: (a) => this.proposeLetGo(a),
-    fileIssue: (a) => this.fileIssue(a),
-  });
+  /**
+   * The CEO's office tools. Every session gets its own server: one can only be connected to one session at a time, so
+   * a shared one left the next session connected but without any tools while an earlier session still held it.
+   */
+  private officeTools(): OfficeTools {
+    return createOfficeTools({
+      companyStatus: () => this.companyStatus(),
+      agentDetail: (a) => this.agentDetail(a),
+      setFloorProfile: (a) => this.setFloorProfile(a),
+      updateJob: (a) => this.updateJob(a),
+      proposeHire: (a) => this.proposeHire(a),
+      proposeLetGo: (a) => this.proposeLetGo(a),
+      fileIssue: (a) => this.fileIssue(a),
+    });
+  }
   private ceoIssues = { filed: 0, repos: new Set<string>() }; // issues filed during the current CEO job
   private messageSeq = 1;
   private agentRt = new Map<string, AgentRuntime>();
@@ -1568,8 +1574,29 @@ export class Swarm {
       this.appendLog(a, [{ kind: 'system', text: `📨 Handed PR #${a.prNumber} to QA.` }]);
       this.toast('success', `${a.name} opened PR #${a.prNumber} for #${a.issueNumber}; it's off to QA`);
     } else {
-      this.toast('success', `${a.name} finished #${a.issueNumber}`);
+      this.noPullRequest(a, repo);
     }
+  }
+
+  /**
+   * An issue session ended without a PR, which would leave the issue "taken" with nobody on it. The same developer,
+   * who has the context and the worktree, is asked once to finish; after that the issue goes back on the board.
+   */
+  private noPullRequest(a: PersistedAgent, repo: PersistedRepo) {
+    const key = `${repo.id}#${a.issueNumber}`;
+    if (this.nudged.has(key)) return this.releaseIssue(a, repo);
+    this.nudged.add(key);
+    // message() starts the session before its first await, so the scheduler can't hand this developer other work first.
+    void this.message(
+      a.id,
+      `You finished without opening a pull request for #${a.issueNumber}. Finish the remaining steps now: commit, push your branch and open the PR with "Closes #${a.issueNumber}". If the issue can't be done, open a draft PR that explains why.`,
+    ).catch(() => this.releaseIssue(a, repo));
+  }
+
+  private releaseIssue(a: PersistedAgent, repo: PersistedRepo) {
+    const n = a.issueNumber;
+    this.clearTask(a);
+    this.postMessage('office', `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's back on the board for anyone.`);
   }
 
   // ---------- QA ----------
@@ -1978,6 +2005,7 @@ export class Swarm {
 
   private scheduleOffset = 0;
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
+  private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
   private pausedUntil = 0; // Claude's usage limit was hit: nothing new starts before this
 
   /** Backlog issues that can start now, most urgent first: the ones holding up the longest chain of other issues, then the oldest. */
@@ -2284,7 +2312,7 @@ export class Swarm {
         permissionMode: s.permissionMode,
         additionalDirectories: this.state.repos.filter((r) => this.repoRt.get(r.id)?.cloneStatus === 'ready').map((r) => this.backend.mainDir(r.fullName)),
         role: 'ceo',
-        office: this.office,
+        office: this.officeTools(),
         // A chat carries on from the CEO's last session, so "why did you propose that?" has an answer.
         resumeSessionId: job.kind === 'chat' ? (a.sessionId ?? undefined) : undefined,
       },

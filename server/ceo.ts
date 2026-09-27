@@ -77,8 +77,10 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
           .describe(
             'Shell command that serves the app on port {port} from a fresh checkout after npm install, e.g. "npm run dev -- --port {port} --strictPort". PORT={port} is always set. {tmp} is a scratch folder. Empty string: back to the default (npm run dev, else start, else preview). Only set it when the default would not serve the app on PORT.',
           ),
+        // Not z.record(): the SDK can't turn it into JSON Schema, and one bad tool empties the whole tools/list.
         preview_env: z
-          .record(z.string(), z.string())
+          .object({})
+          .catchall(z.string())
           .optional()
           .describe('Extra environment variables for the preview; {port} and {tmp} are replaced in the values. Replaces the whole set.'),
       },
