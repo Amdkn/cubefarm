@@ -5,7 +5,7 @@ A cartoon, first-person 3D office where a swarm of **Claude Code** agents works 
 - Every connected GitHub repo gets its own **floor**. Ride the **elevator** between them.
 - Each agent is a separate Claude Code instance (via the **Claude Agent SDK**) running on your Claude subscription, in its own git worktree.
 - Walk up behind an agent to watch their **monitor**: it streams their real terminal, and switches to a split view with a live **browser** pane when they test the UI with Playwright.
-- Every floor has a **QA lab** with at least one **QA tester** (lab coat, glasses). Every pull request is tested before it can be merged, and the test report and screenshots are posted on the PR.
+- Every floor has a **QA lab** with at least one **QA tester** (lab coat, glasses). Every pull request is reviewed and tested before it can be merged, and the report and screenshots are posted on the PR. With **auto-merge** on, a PR merges itself once QA signs off and GitHub's checks are green.
 - The **whiteboard** on each floor is the Kanban board: backlog, in progress (who's on what), in QA, ready to merge, and merged.
 - The **manager's office** in the lobby is where you connect repos, create new blank repos, hire agents, file issues and tune settings.
 
@@ -63,12 +63,21 @@ Your floor and position are remembered, so a page refresh puts you back where yo
 2. **In progress.** The server fetches the repo and creates a git worktree for that developer on the branch `swarm/issue-<n>-<agent>`, branched from the default branch. A Claude Code session starts there with the issue text. The developer implements the change, runs the project's checks, pushes the branch and opens a PR with `gh pr create` that says `Closes #<n>`.
 3. **In QA.** The PR is handed to the floor's QA lab. A free QA tester checks out the PR head in their own worktree; when every tester is busy, a free developer who didn't write the PR covers for them, `testing` specialists first. The tester then:
    - reads the PR and the linked issue to work out the acceptance criteria
+   - reviews the diff like a code reviewer: bugs, unhandled errors and edge cases, security problems, leftover debug code, missing tests
    - runs the test suite, linters and build
    - exercises the feature in a real headless browser (Playwright), including phone sizes and edge cases, taking screenshots of each important state
    - returns a structured report: a verdict, the checks performed, the commands run, and a caption for each screenshot
 4. **Evidence on the PR.** The server uploads the screenshots to an orphan branch called `swarm-qa-evidence`, so evidence never lands in your code, and posts a comment on the PR. The comment contains the verdict, a table of checks, the commands run, and the screenshots.
 5. **Fail → fix → re-test.** If QA fails, the report goes back to the developer who wrote the PR, who resumes their own Claude Code session and pushes fixes to the same branch. If they're busy on something else, any free developer takes the fix instead. The PR then goes back to QA for the next round. After 3 failed rounds it's flagged **needs you**.
-6. **Ready to merge.** Once QA passes, the PR moves to **Ready to merge**. Review it on GitHub, including the QA comment, then press **Merge** (squash) on the board. The developer sees the merge, celebrates, and goes back to the backlog. Merging a PR that hasn't passed QA asks you to confirm first.
+6. **Merge.** Once QA passes, the PR moves to **Ready to merge**. With **auto-merge** on for the floor (the default; switch it in the manager's console or on the Kanban board), the office takes it from there:
+   - It waits for GitHub's checks (Actions, Vercel and so on) and merges as soon as they're green, but only the exact commit QA signed off on. Commits pushed after the sign-off go back through QA first.
+   - If checks fail, or the PR conflicts with the default branch because other work merged first, a free developer gets the failing checks or the conflict, fixes the branch, and QA re-tests it when the code changed. After 3 such fixes it's flagged **needs you**.
+   - It squash-merges (falling back to a merge commit if the repo doesn't allow squash), deletes the remote branch, and updates the branch first if the repo only merges up-to-date branches.
+   - If GitHub refuses the merge (say, branch protection wants an approving review), your phone gets a message and the office retries every 10 minutes. Checks still running after 30 minutes also get a message.
+   - Only `swarm/` branches merge themselves. PRs people opened are left for you.
+
+   With auto-merge off, review the PR on GitHub, including the QA comment, then press **Merge** (squash) on the board. Merging a PR that hasn't passed QA asks you to confirm first. Either way, the developer sees the merge, celebrates, and goes back to the backlog.
+7. **Your folder catches up.** After any merge, the floor's folder fast-forwards to the default branch, but only when it's on that branch with no local changes. Nothing is ever stashed, reset or discarded; otherwise the manager's console shows why it wasn't updated (`2 behind: local changes`, `on branch feature-x`, `diverged`). If `package.json` or the lockfile changed, it runs `npm install`. The office's own folder is never updated while it runs: it shows `update ready` instead. **Sync now** in the manager's console retries.
 
 PRs opened by people, not agents, show up under **In QA** as "not tested yet", with a **Send to QA** button.
 
@@ -95,7 +104,7 @@ Agents get names from a pool of computing pioneers (developers) and fictional de
 Agents run on your machine, so the default **guarded** permission mode:
 
 - auto-approves file edits inside the agent's own worktree and refuses writes anywhere else
-- refuses force-pushes, pushes to the default branch, `gh pr merge`, repo admin commands and a few destructive shell patterns
+- refuses force-pushes, pushes to the default branch, `gh pr merge` (the office does the merging), repo admin commands and a few destructive shell patterns
 - gives agents only the Playwright MCP server: claude.ai connectors (Gmail, Drive, …), user-level MCP servers and plugins are not loaded (`strictMcpConfig`)
 - disables `AskUserQuestion`. Nobody is watching live, so agents decide and record their assumptions in the PR
 

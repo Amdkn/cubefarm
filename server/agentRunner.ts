@@ -93,7 +93,7 @@ const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 const BLOCKED_COMMANDS: { re: RegExp; why: string }[] = [
   { re: /\bgit\s+push\b[^\n]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s\+\S)/, why: 'force-pushing is not allowed' },
-  { re: /\bgh\s+pr\s+merge\b/, why: 'the manager merges pull requests, not agents' },
+  { re: /\bgh\s+pr\s+merge\b/, why: 'the office merges pull requests once QA and the checks pass, not agents' },
   { re: /\bgh\s+(repo\s+(delete|edit|rename|archive)|secret|auth|release\s+delete|api\s+-X\s*DELETE)\b/, why: 'repository administration is off-limits' },
   { re: /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(\/|~|[A-Za-z]:[\\/]?)(\s|$)/, why: 'deleting a filesystem root is not allowed' },
   { re: /\b(shutdown|format\s+[a-z]:|mkfs|Remove-Item\s+[^\n]*-Recurse[^\n]*[A-Za-z]:\\\s*$)/i, why: 'destructive system command' },

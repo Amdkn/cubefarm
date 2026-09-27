@@ -43,6 +43,10 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
           </div>
           <div className="muted small" title={repo.localPath ? 'Your own project folder' : 'A clone the office manages'}>
             📁 <code>{repo.checkoutPath}</code>
+            {repo.folderSync && ` · ${repo.folderSync}`}{' '}
+            <button className="btn btn-small btn-ghost" title="Fast-forward it to GitHub's default branch, when that's safe" onClick={() => void attempt(() => api.syncFolder(repo.id))}>
+              ⟳ Sync now
+            </button>
           </div>
           {repo.cloneError && <div className="term-error small">clone failed: {repo.cloneError}</div>}
           {repo.syncError && <div className="term-error small">sync failed: {repo.syncError}</div>}
@@ -55,6 +59,9 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
       <div className="row wrap">
         <label className="toggle">
           <input type="checkbox" checked={repo.autoAssign} onChange={(e) => patch({ autoAssign: e.target.checked })} /> ⚡ Auto-assign issues
+        </label>
+        <label className="toggle" title="Merge a PR as soon as QA has signed off on its latest commit and GitHub's checks are green">
+          <input type="checkbox" checked={repo.autoMerge} onChange={(e) => patch({ autoMerge: e.target.checked })} /> 🔀 Auto-merge
         </label>
         <label className="toggle">
           <input type="checkbox" checked={repo.browserTesting} onChange={(e) => patch({ browserTesting: e.target.checked })} /> 🌐 Browser testing (Playwright MCP)
