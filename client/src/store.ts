@@ -107,7 +107,7 @@ export const useStore = create<State>((set, get) => ({
   workspaceRoot: '',
   // Until the server's snapshot arrives; setupDone stays true so the wizard doesn't flash while loading.
   settings: {
-    maxConcurrent: 4,
+    sessionLimit: 0,
     defaultModel: 'claude-opus-5-5',
     defaultEffort: 'medium',
     permissionMode: 'guarded',

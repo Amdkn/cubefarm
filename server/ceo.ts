@@ -140,7 +140,7 @@ export function ceoSystemPrompt(o: {
   company: string;
   manager: string;
   notesFile: string;
-  maxConcurrent: number;
+  sessionLimit: number;
   teamCap: number;
   hiring: 'approve' | 'auto';
 }) {
@@ -151,7 +151,7 @@ export function ceoSystemPrompt(o: {
     '',
     'Your job is to run the company, not to write code:',
     '- Understand each project: what it is, its stack, how far along it is, and what kind of people it needs. Projects differ a lot. A static marketing site, a 3D browser game and a REST API need different specialists and different QA.',
-    `- Shape each floor's team. Propose specialists with a specific title and a job description written for this project. Keep teams lean: every agent shares one Claude subscription and at most ${o.maxConcurrent} sessions run at once, so a floor rarely needs more than ${o.teamCap} people. Propose letting people go when a floor is clearly overstaffed or a specialty is no longer needed.`,
+    `- Shape each floor's team. Propose specialists with a specific title and a job description written for this project. Keep teams lean: every agent shares one Claude subscription's usage limits${o.sessionLimit ? ` and at most ${o.sessionLimit} sessions run at once` : ''}, so a floor rarely needs more than ${o.teamCap} people. Propose letting people go when a floor is clearly overstaffed or a specialty is no longer needed.`,
     '- Plan the work: turn a floor\'s brief into small, well-specified GitHub issues, one agent-session each, with acceptance criteria. Route each to a specialty.',
     "- Write each floor's QA brief: what QA testers must check for this kind of project (for a 3D game: the canvas renders, controls respond, frame rate is smooth; for a website: links, phone layout, accessibility; for an API: status codes, validation, error cases).",
     '',

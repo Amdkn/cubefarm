@@ -308,7 +308,7 @@ export { HttpError };
 export class Swarm {
   private state: Persisted = {
     settings: {
-      maxConcurrent: 4,
+      sessionLimit: 0,
       defaultModel: DEFAULT_MODEL,
       defaultEffort: 'medium',
       permissionMode: 'guarded',
@@ -396,6 +396,12 @@ export class Swarm {
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!this.state.settings.defaultModel) this.state.settings.defaultModel = DEFAULT_MODEL;
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
+      // "Max concurrent sessions" (default 4) became an optional session limit. The old default goes; a limit the manager chose stays.
+      const old = this.state.settings as SwarmSettings & { maxConcurrent?: number };
+      if (old.maxConcurrent !== undefined) {
+        if (loaded.settings?.sessionLimit === undefined) old.sessionLimit = old.maxConcurrent === 4 ? 0 : old.maxConcurrent;
+        delete old.maxConcurrent;
+      }
       // Offices that were set up before the setup wizard existed skip it.
       if (loaded.settings && loaded.settings.setupDone === undefined && this.state.repos.length > 0) {
         Object.assign(this.state.settings, { setupDone: true, tutorialStep: -1 });
@@ -466,7 +472,7 @@ export class Swarm {
         this.clearTask(a);
         continue;
       }
-      if (this.running() >= this.state.settings.maxConcurrent) continue; // stays 'stopped'; the manager can resume it later
+      if (this.slotsFull()) continue; // stays 'stopped'; the manager can resume it later
       void this.message(a.id, 'The office server restarted while you were working. Check the state of your worktree and continue where you left off.').catch((err) =>
         console.warn(`could not resume ${a.name}`, err),
       );
@@ -670,6 +676,12 @@ export class Swarm {
 
   private running() {
     return this.state.agents.filter((a) => BUSY.includes(a.status)).length;
+  }
+
+  /** True when the manager has set a session limit and every slot is taken. */
+  private slotsFull() {
+    const limit = this.state.settings.sessionLimit;
+    return limit > 0 && this.running() >= limit;
   }
 
   private agentSlug(a: PersistedAgent) {
@@ -1103,8 +1115,8 @@ export class Swarm {
   }
 
   private ensureSlot() {
-    if (this.running() >= this.state.settings.maxConcurrent) {
-      throw new HttpError(429, `All ${this.state.settings.maxConcurrent} concurrent session slots are busy. Raise the limit in the manager's office or wait.`);
+    if (this.slotsFull()) {
+      throw new HttpError(429, `All ${this.state.settings.sessionLimit} session slots are busy. Raise or clear the session limit in the manager's console, or wait.`);
     }
   }
 
@@ -1654,7 +1666,7 @@ export class Swarm {
 
   updateSettings(patch: Partial<SwarmSettings>) {
     const s = this.state.settings;
-    if (patch.maxConcurrent !== undefined) s.maxConcurrent = Math.max(1, Math.min(32, Math.round(Number(patch.maxConcurrent)) || 1));
+    if (patch.sessionLimit !== undefined) s.sessionLimit = Math.max(0, Math.round(Number(patch.sessionLimit)) || 0);
     if (patch.defaultModel !== undefined) s.defaultModel = String(patch.defaultModel).trim() || DEFAULT_MODEL;
     if (patch.defaultEffort !== undefined && EFFORTS.includes(patch.defaultEffort)) s.defaultEffort = patch.defaultEffort;
     if (patch.permissionMode === 'guarded' || patch.permissionMode === 'bypass') s.permissionMode = patch.permissionMode;
@@ -1760,7 +1772,7 @@ export class Swarm {
       while (progress) {
         progress = false;
         for (const repo of order) {
-          if (this.running() >= this.state.settings.maxConcurrent) return;
+          if (this.slotsFull()) return;
           if (start(repo)) progress = true;
         }
       }
@@ -1865,7 +1877,7 @@ export class Swarm {
     const a = this.state.agents.find((x) => x.id === CEO_ID);
     const c = this.state.ceo;
     if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
-    if (this.running() >= this.state.settings.maxConcurrent) return;
+    if (this.slotsFull()) return;
     const rank: Record<CeoJob['kind'], number> = { chat: 0, onboard: 1, plan: 1, review: 2 };
     // A floor's jobs wait for its clone and first sync, so the CEO has something to read.
     const ready = (j: CeoJob) => {
@@ -1922,7 +1934,7 @@ export class Swarm {
           company: s.companyName,
           manager: s.managerName,
           notesFile: path.join(CEO_DIR, 'NOTES.md'),
-          maxConcurrent: s.maxConcurrent,
+          sessionLimit: s.sessionLimit,
           teamCap: s.teamCap,
           hiring: s.hiring,
         }),
@@ -2220,7 +2232,7 @@ export class Swarm {
           ceo: this.ceo().name,
           hiring: s.hiring === 'auto' ? `auto-approved while a floor has fewer than ${s.teamCap} people` : 'the manager approves every proposal',
           teamCap: s.teamCap,
-          maxConcurrentSessions: s.maxConcurrent,
+          sessionLimit: s.sessionLimit || 'none',
           sessionsRunning: this.running(),
           deskLimits: { dev: MAX_DESKS.dev, qa: MAX_DESKS.qa },
         },

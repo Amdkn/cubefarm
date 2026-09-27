@@ -84,7 +84,7 @@ Agents get names from a pool of computing pioneers (developers) and fictional de
 
 - Every agent defaults to **Claude Opus 5.5 (`claude-opus-5-5`) at medium effort**. You can change the default, or set it per agent, in the manager's console.
 - Agents run on your Claude **subscription**: the server removes `ANTHROPIC_API_KEY` and all other inherited `CLAUDE_*` / `ANTHROPIC_*` variables before starting each agent, so the SDK uses your Claude Code login.
-- Every agent draws on the same subscription usage limits. **Max concurrent sessions** (default 4) caps how many run at once. When a limit is hit, the agent's terminal shows it.
+- Every agent draws on the same subscription usage limits. By default every agent with work runs at once; set a **Session limit** in the manager's console to cap it. When a limit is hit, the agent's terminal shows it.
 
 ## Safety model
 

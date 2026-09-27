@@ -64,7 +64,7 @@ export function HUD() {
         {demo && <span className="pill pill-demo">DEMO</span>}
         <span className={`pill ${connected ? 'pill-ok' : 'pill-bad'}`}>{connected ? '● live' : '○ reconnecting'}</span>
         <span className="pill">
-          ⚙️ {running}/{settings.maxConcurrent} sessions
+          ⚙️ {settings.sessionLimit ? `${running}/${settings.sessionLimit}` : running} sessions
         </span>
         {user && <span className="pill">🐙 {user}</span>}
       </div>

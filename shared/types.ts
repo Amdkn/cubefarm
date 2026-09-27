@@ -187,7 +187,7 @@ export interface QaView {
 }
 
 export interface SwarmSettings {
-  maxConcurrent: number; // cap on simultaneously running Claude Code sessions
+  sessionLimit: number; // most Claude Code sessions running at once; 0 = no limit
   defaultModel: string;
   defaultEffort: EffortLevel;
   permissionMode: 'guarded' | 'bypass';
