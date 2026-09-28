@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type CeoInfo, type HireRequestView, type LogLine, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type CeoInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { blockers } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
@@ -21,8 +21,14 @@ export type ManagerTab = 'floors' | 'ceo' | 'team' | 'issues' | 'settings';
 export interface Focus {
   id: string;
   label: string;
-  action: Overlay | { kind: 'hire'; repoId: string; role: 'dev' | 'qa' };
+  action: Overlay | { kind: 'hire'; repoId: string; role: 'dev' | 'qa' } | { kind: 'pickup'; toyId: string } | { kind: 'poke'; toyId: string };
 }
+
+/** What the player is carrying. Other items (a blaster, say) join the union with their own kind. */
+export type Held =
+  | { kind: 'ball'; id: string }
+  /** A foam blaster: darts left in the magazine, and performance.now() when a reload started (null when not reloading). */
+  | { kind: 'blaster'; id: string; ammo: number; reloadAt: number | null };
 
 export interface Toast {
   id: number;
@@ -48,6 +54,10 @@ interface State {
   ceo: CeoInfo;
   messages: PhoneMessage[];
   phoneReadAt: number;
+  officeCommit?: string | null; // undefined: the server can't update itself
+  officeUpdate?: OfficeUpdateView;
+  usage: UsageView; // Claude's subscription usage: normal, pacing after a warning, or paused at the limit
+  restarting: boolean; // the connection dropped because the office is restarting to update
 
   floor: number; // 0 = lobby
   travel: { to: number; phase: 'closing' | 'opening' } | null;
@@ -56,11 +66,19 @@ interface State {
   locked: boolean;
   started: boolean;
   toasts: Toast[];
+  held: Held | null;
+  /** performance.now() when the player started charging a throw; null when they aren't. */
+  chargeAt: number | null;
 
   apply(ev: ServerEvent): void;
   setConnected(v: boolean): void;
+  setRestarting(v: boolean): void;
+  setOfficeUpdate(u: OfficeUpdateView): void;
   openOverlay(o: Overlay | null): void;
   setFocus(f: Focus | null): void;
+  /** Pick something up (or swap), or let go of it with null. Always ends a charge. */
+  setHeld(h: Held | null): void;
+  setCharge(at: number | null): void;
   setLocked(v: boolean): void;
   start(): void;
   goToFloor(n: number): void;
@@ -120,6 +138,7 @@ export const useStore = create<State>((set, get) => ({
     projectsDir: '',
     setupDone: true,
     tutorialStep: -1,
+    pacingSessions: 3,
   },
   repos: [],
   agents: {},
@@ -130,6 +149,8 @@ export const useStore = create<State>((set, get) => ({
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
   messages: [],
   phoneReadAt: 0,
+  usage: { state: 'normal', until: null },
+  restarting: false,
 
   floor: loadView()?.floor ?? 0,
   travel: null,
@@ -138,6 +159,8 @@ export const useStore = create<State>((set, get) => ({
   locked: false,
   started: false,
   toasts: [],
+  held: null,
+  chargeAt: null,
 
   apply(ev) {
     // Cues compare the old state with the new, so each change sounds once; snapshots (page load,
@@ -175,6 +198,10 @@ export const useStore = create<State>((set, get) => ({
           ceo: d.ceo,
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
+          officeCommit: d.officeCommit,
+          officeUpdate: d.officeUpdate,
+          usage: d.usage,
+          restarting: false,
           floor: floorExists ? get().floor : 0,
         });
         break;
@@ -265,12 +292,21 @@ export const useStore = create<State>((set, get) => ({
       case 'toast':
         get().pushToast(ev.level, ev.text);
         break;
+      case 'officeUpdate':
+        set({ officeUpdate: ev.officeUpdate });
+        break;
+      case 'usage':
+        set({ usage: ev.usage });
+        break;
     }
   },
 
   setConnected: (connected) => set({ connected }),
+  setRestarting: (restarting) => set({ restarting }),
+  setOfficeUpdate: (officeUpdate) => set({ officeUpdate }),
   openOverlay(overlay) {
-    set({ overlay, focus: overlay ? null : get().focus });
+    // Opening any panel drops whatever you're carrying, so nothing is left floating behind it.
+    set(overlay ? { overlay, focus: null, held: null, chargeAt: null } : { overlay });
     if (overlay && document.pointerLockElement) document.exitPointerLock();
   },
   setFocus: (focus) => {
@@ -278,6 +314,8 @@ export const useStore = create<State>((set, get) => ({
     if (cur?.id === focus?.id && cur?.label === focus?.label) return;
     set({ focus });
   },
+  setHeld: (held) => set({ held, chargeAt: null }),
+  setCharge: (chargeAt) => set({ chargeAt }),
   setLocked: (locked) => set({ locked }),
   start: () => set({ started: true }),
   goToFloor(n) {
@@ -285,7 +323,7 @@ export const useStore = create<State>((set, get) => ({
       set({ overlay: null });
       return;
     }
-    set({ overlay: null, travel: { to: n, phase: 'closing' } });
+    set({ overlay: null, held: null, chargeAt: null, travel: { to: n, phase: 'closing' } });
   },
   finishTravel(phase) {
     const t = get().travel;

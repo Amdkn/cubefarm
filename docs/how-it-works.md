@@ -9,6 +9,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
    - A `swarm:<specialty>` label is a preference, not a lock. A free specialist gets first pick, and otherwise the issue goes to whichever free developer is least needed for their own specialty.
    - If a session fails, its issue goes back on the board for someone else, and the agent gets new work after a two-minute cooldown. An issue that fails twice waits for you to assign it by hand.
    - If Claude turns a session away because your usage limit is reached, the office starts no new work until the limit resets.
+   - Before that, when Claude warns that usage is getting high, the office paces itself until the window resets (an hour if Claude doesn't say): QA, fixes and CEO jobs start as usual, but new issues only start while fewer sessions than **Sessions while pacing** (manager's console → Settings, default 3) are running. Your phone gets a message when pacing starts and when it ends.
 2. **In progress.** The server fetches the repo and creates a git worktree for that developer on the branch `swarm/issue-<n>-<agent>`, branched from the default branch. A Claude Code session starts there with the issue text. The developer implements the change, runs the project's checks, pushes the branch and opens a PR with `gh pr create` that says `Closes #<n>`.
 3. **In QA.** The PR is handed to the floor's QA lab. A free QA tester checks out the PR head in their own worktree; when every tester is busy, a free developer who didn't write the PR covers for them, `testing` specialists first. The tester then:
    - reads the PR and the linked issue to work out the acceptance criteria
@@ -26,7 +27,9 @@ The details behind the office: how an issue becomes a merged pull request, who d
    - Only `swarm/` branches merge themselves. PRs people opened are left for you.
 
    With auto-merge off, review the PR on GitHub, including the QA comment, then press **Merge** (squash) on the board. Merging a PR that hasn't passed QA asks you to confirm first. Either way, the developer sees the merge, celebrates, and goes back to the backlog.
-7. **Your folder catches up.** After any merge, the floor's folder fast-forwards to the default branch, but only when it's on that branch with no local changes. Nothing is ever stashed, reset or discarded; otherwise the manager's console shows why it wasn't updated (`2 behind: local changes`, `on branch feature-x`, `diverged`). If `package.json` or the lockfile changed, it runs `npm install`. The office's own folder is never updated while it runs: it shows `update ready` instead. **Sync now** in the manager's console retries.
+7. **Your folder catches up.** After any merge, the floor's folder fast-forwards to the default branch, but only when it's on that branch with no local changes. Nothing is ever stashed, reset or discarded; otherwise the manager's console shows why it wasn't updated (`2 behind: local changes`, `on branch feature-x`, `diverged`). If `package.json` or the lockfile changed, it runs `npm install`. **Sync now** in the manager's console retries.
+
+   The office's own folder is the exception: pulling it would restart the office mid-work, so it shows `update ready` and the **Office** row at the top of the manager's console takes over. When the office was started by its launcher (`npm run dev` / `npm start`) and **Update automatically** is on, or you press **Update now**, the office drains: it starts no new issues, QA or CEO jobs, and lets the running sessions finish. Once nothing runs (or after 20 minutes, when the remaining sessions are stopped and their work goes back to the queue), it hands the update to the launcher, which pulls, installs, builds and restarts it; your phone then says which commit it moved to, or why the update was rolled back. **Later** postpones it for 2 hours, or until a newer commit lands. Started any other way, the office only reports the update.
 
 PRs opened by people, not agents, show up under **In QA** as "not tested yet", with a **Send to QA** button.
 
@@ -100,3 +103,20 @@ Example, this repo previewing itself (a demo office on the floor's port, with it
 ```
 
 In `--demo` mode no git or npm runs: starting a preview serves a small placeholder page ("<floor> app · <ref>", with a click counter) on the floor's port.
+
+## Updating the office
+
+Run from a clone of this repo, the office has a parent process, the launcher `scripts/office.mjs`. `npm start` runs the built office under it (`bin/cubefarm.js`: the usual checks, then `dist-server/` serving `dist/`); `npm run dev` and `npm run demo` add `--dev`: the server from source plus Vite (on `SWARM_CLIENT_PORT`, default 5317), with the server restarted when code in `server/` or `shared/` changes. It starts the server with an IPC channel and `SWARM_LAUNCHER=1`.
+
+When the office has finished its work and asks for an update (`{ type: 'office:update', from }`), or when you type `u` + Enter in the launcher's terminal, the launcher:
+
+1. Pauses the file watcher and stops the office: it sends the server `{ type: 'office:shutdown' }` (the server stops its floor previews and exits), stops Vite, and kills whatever is still running after 20 seconds, process trees included (`taskkill /T /F` on Windows).
+2. Checks the folder: only on origin's default branch, with no local changes and no local commits. Otherwise it changes nothing. Nothing is ever stashed or discarded.
+3. Runs `git fetch` and `git merge --ff-only origin/<default>`.
+4. Runs `npm install --no-save` if `package.json` or `package-lock.json` changed. This only happens once nothing is running, because Windows locks esbuild's and Rollup's binaries while they're in use. `--no-save` leaves the lockfile as pulled, so another npm version can't turn it into a local change that blocks the next update.
+5. Under `npm start`, runs `npm run build`.
+6. Writes `<SWARM_HOME>/last-update.json`: `{ from, to, ok, error?, installed, built, at }`. Here `to` is the commit the office runs afterwards, `installed` and `built` say whether npm install and the build ran, and `at` is a timestamp in milliseconds. Then it starts the office again, and the server reports the result on your phone.
+
+If a step fails, the launcher goes back with `git reset --keep <from>`, which never touches local changes. It reinstalls the old dependencies if npm install ran, rebuilds if a build ran, starts the old version and writes `ok: false` with the error. A refused update (another branch, local changes) also writes `ok: false`.
+
+Ctrl+C (or SIGTERM) stops the server, then Vite, and leaves no processes behind; press it twice to quit at once. The launcher is only for a checkout: `npx cubefarm` and a bare `node --import tsx server/index.ts` have none, so there the office only reports that an update is ready.

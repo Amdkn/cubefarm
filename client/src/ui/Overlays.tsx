@@ -10,8 +10,9 @@ import { Phone } from './Phone';
 import { TerminalView } from './TerminalView';
 import { getAudioPrefs, setAudioPrefs, subscribeAudio } from './sfx';
 
-// Closing a panel leaves the mouse free: the next click on the view only grabs it again, so it
-// can't also act on whatever the crosshair lands on.
+// Closing a panel grabs the mouse again right away (world/lookLock.ts; "Grab the mouse when panels
+// close" in help turns that off), and mouse presses are swallowed for a moment so a double click on
+// ✕ or the backdrop can't act on whatever the crosshair lands on.
 export function closeOverlay() {
   useStore.getState().openOverlay(null);
 }
@@ -74,7 +75,7 @@ export function SoundControls() {
 }
 
 function MouseSettings() {
-  const { sensitivity, invertY, set } = useLookPrefs();
+  const { sensitivity, invertY, grabOnClose, set } = useLookPrefs();
   return (
     <div className="mouse-settings">
       <label className="mouse-sens">
@@ -90,6 +91,9 @@ function MouseSettings() {
       <label className="toggle">
         <input type="checkbox" checked={invertY} onChange={(e) => set({ invertY: e.target.checked })} /> Invert Y (push the mouse forward to look down)
       </label>
+      <label className="toggle">
+        <input type="checkbox" checked={grabOnClose} onChange={(e) => set({ grabOnClose: e.target.checked })} /> Grab the mouse when panels close
+      </label>
     </div>
   );
 }
@@ -103,9 +107,19 @@ function Help() {
           <kbd>W</kbd>
           <kbd>A</kbd>
           <kbd>S</kbd>
-          <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>E</kbd> or left click interacts with whatever the crosshair is on (the first click only grabs the mouse) · <kbd>Esc</kbd> frees the mouse.
+          <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>E</kbd> or left click interacts with whatever the crosshair is on (the first click only grabs the mouse) · <kbd>Esc</kbd> frees the mouse. Closing a panel or changing floor grabs it again.
         </p>
         <MouseSettings />
+        <h3>Balls</h3>
+        <p>
+          Walk into a ball to push it, or aim at one and press <kbd>E</kbd> (or click) to pick it up. Click or press <kbd>F</kbd> to throw: a tap lobs it, holding charges a harder throw. <kbd>G</kbd> drops it at your feet.
+          With a ball in hand, <kbd>E</kbd> still works on desks, boards and the elevator (the ball drops when a panel opens), and <kbd>E</kbd> on another ball swaps them.
+        </p>
+        <h3>Foam blasters</h3>
+        <p>
+          Every floor has a rack of foam blasters by the south wall: aim at it and press <kbd>E</kbd> to take one. <b>Fire</b>: click or <kbd>F</kbd> (12 darts, up to four a second). <b>Reload</b>: <kbd>R</kbd>. <b>Drop</b>: <kbd>G</kbd>, then <kbd>E</kbd> picks it up again.
+          Darts stick to walls, boards and screens when they hit square on and bounce off everything else. They never open anything, and the blasters go back on the rack when you change floors.
+        </p>
         <h3>Sound</h3>
         <p>
           The office chimes when a PR is ready to merge, fails QA or gets merged, when someone hits an error and when a new teammate arrives. <kbd>M</kbd> mutes or unmutes anywhere.
@@ -118,7 +132,8 @@ function Help() {
         </p>
         <h3>Your phone</h3>
         <p>
-          Press <kbd>P</kbd> anywhere to pull out your phone. Text the CEO, approve or decline the people they want to hire, and see every project at a glance. The red badge counts decisions and messages waiting for you.
+          Press <kbd>P</kbd> anywhere to pull out your phone. Text the CEO, approve or decline the people they want to hire, and see every project at a glance. The red badge counts decisions and messages waiting for you. In the chat, and in an agent's
+          terminal, <kbd>Enter</kbd> sends and <kbd>Shift</kbd>+<kbd>Enter</kbd> starts a new line.
         </p>
         <h3>Who's working</h3>
         <p>

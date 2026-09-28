@@ -206,6 +206,29 @@ export interface SwarmSettings {
   projectsDir: string; // where your project folders live; new projects are created here
   setupDone: boolean; // the first-run setup wizard has been completed or skipped
   tutorialStep: number; // index of the current tutorial step; -1 when finished or skipped
+  autoUpdate?: boolean; // update the office itself once it's quiet (absent on servers without self-update)
+  pacingSessions: number; // after Claude warns about usage, new issues start only while fewer sessions than this run
+}
+
+/** Claude's subscription usage: normal, pacing new work after a usage warning, or paused at the limit until `until`. */
+export interface UsageView {
+  state: 'normal' | 'pacing' | 'paused';
+  until: number | null;
+}
+
+/**
+ * Where the office's own update stands. none: up to date · available: new commits on GitHub · waiting / draining:
+ * starting nothing new while running sessions finish · updating: handed to the launcher · failed: see detail.
+ */
+export type OfficeUpdateState = 'none' | 'available' | 'waiting' | 'draining' | 'updating' | 'failed';
+
+export interface OfficeUpdateView {
+  state: OfficeUpdateState;
+  behind: number; // commits the office's folder is behind GitHub
+  launcher: boolean; // started by npm run dev / npm start, which can install the update and restart the office
+  drainingSince: number | null;
+  running: number; // sessions still running
+  detail: string | null;
 }
 
 /** A CEO proposal to hire someone or let someone go. The manager (the board) decides. */
@@ -265,6 +288,9 @@ export interface WorldSnapshot {
   ceo: CeoInfo;
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
+  officeCommit?: string | null; // short sha the server started on (absent on servers without self-update)
+  officeUpdate?: OfficeUpdateView;
+  usage: UsageView;
 }
 
 export type ServerEvent =
@@ -282,6 +308,8 @@ export type ServerEvent =
   | { type: 'ceo'; ceo: CeoInfo }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
+  | { type: 'officeUpdate'; officeUpdate: OfficeUpdateView }
+  | { type: 'usage'; usage: UsageView }
   | { type: 'toast'; level: 'info' | 'success' | 'error'; text: string };
 
 export interface GhRepoSummary {

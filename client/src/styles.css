@@ -169,6 +169,15 @@ input[type='color'] {
 textarea {
   resize: vertical;
 }
+/* ui/MessageBox.tsx: one line tall, grows with the text to about six lines, then scrolls */
+textarea.msg-box {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.35;
+  max-height: calc(6 * 1.35em + 20px);
+  resize: none;
+  overflow-y: auto;
+}
 input.inline {
   padding: 4px 6px;
   border-color: transparent;
@@ -363,6 +372,31 @@ input.inline:focus {
   font-weight: 600;
   max-width: 90vw;
 }
+/* The office updating itself: under the floor card, out of the way; opens the console. */
+.office-chip {
+  position: absolute;
+  top: 100px;
+  left: 16px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 5px 12px;
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: #ffe8a3;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  box-shadow: 0 3px 0 var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.office-chip:hover {
+  transform: translateY(-1px);
+}
+.office-chip:focus-visible {
+  outline: 3px solid var(--accent, #ff8a5b);
+  outline-offset: 2px;
+}
 .crosshair {
   position: absolute;
   top: 50%;
@@ -394,6 +428,82 @@ input.inline:focus {
   font-size: 1.05rem;
   white-space: nowrap;
   pointer-events: none;
+}
+/* Carrying something: sits under the interact hint. */
+.hud-held {
+  bottom: calc(22% - 56px);
+  font-size: 0.95rem;
+}
+/* Throw charge, just under the crosshair. */
+.charge {
+  position: absolute;
+  top: calc(50% + 14px);
+  left: 50%;
+  width: 56px;
+  height: 9px;
+  margin-left: -28px;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  background: var(--paper);
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.1s;
+  pointer-events: none;
+}
+.charge-on {
+  opacity: 1;
+}
+.charge-fill {
+  height: 100%;
+  background: #ffd166;
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.charge-full .charge-fill {
+  background: #ff8a5b;
+}
+/* Foam blaster ammo, bottom right above the phone, next to where the blaster sits in view. */
+.hud-ammo {
+  position: absolute;
+  right: 16px;
+  bottom: 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 8px 14px;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  box-shadow: 0 4px 0 var(--ink);
+  font-weight: 700;
+  pointer-events: none;
+}
+.hud-ammo-count {
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+.hud-ammo-empty .hud-ammo-count {
+  color: #ef476f;
+}
+.hud-ammo-note {
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0.75;
+}
+.hud-ammo-bar {
+  width: 100%;
+  min-width: 110px;
+  height: 8px;
+  border: 2px solid var(--ink);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.hud-ammo-fill {
+  height: 100%;
+  background: #ffd166;
+  transform: scaleX(0);
+  transform-origin: left;
 }
 .hud-resume {
   position: absolute;
@@ -1038,6 +1148,7 @@ input.inline:focus {
 }
 .term-input {
   display: flex;
+  align-items: flex-end;
   gap: 8px;
   margin-top: 12px;
 }
@@ -1486,6 +1597,35 @@ input.inline:focus {
   font-weight: 700;
   flex: none;
   text-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+.office-card {
+  border-left: 12px solid var(--ink);
+}
+.office-badge {
+  background: #fff3c4;
+  text-shadow: none;
+}
+.office-card .grow {
+  min-width: 190px; /* narrow screens: the buttons wrap below instead of squeezing the status */
+}
+.office-state {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.office-state-ok {
+  color: #1b873a;
+}
+.office-state-busy {
+  color: #9a5b00;
+}
+.office-state-bad {
+  color: #c0223b;
+}
+.office-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
 }
 .repo-list {
   max-height: 260px;
@@ -2245,6 +2385,7 @@ input.inline:focus {
 }
 .chat-input {
   display: flex;
+  align-items: flex-end;
   gap: 6px;
   padding: 8px 10px 10px;
   background: #fff;

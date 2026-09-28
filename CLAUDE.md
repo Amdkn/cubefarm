@@ -25,7 +25,10 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
   Then open `http://localhost:<your port>` (the server serves the built `dist/`). The startup banner must say
   `DEMO MODE` and print a `state:` path inside your `SWARM_HOME`. Stop it when done; don't commit `.swarm-home`.
 - Never real mode (no `--demo`), and never `npm run dev` / `npm run demo` / `npm start` / `npx cubefarm`: they default
-  to 4317, and `dev`/`demo` hardcode Vite's 5317.
+  to 4317, and `dev`/`demo` default Vite to 5317. The first three run `scripts/office.mjs`, the launcher, which also
+  updates its own folder (git fetch + merge, npm install, build) when the office or you ask for it (`u`). Run it
+  only in a throwaway clone outside the live office, with `--demo` and your `SWARM_HOME`, `SWARM_PORT` and
+  `SWARM_CLIENT_PORT`.
 - Guardrails never loosen: guarded mode refuses writes outside the worktree, force-pushes, pushes to the default
   branch and `gh pr merge`; `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
@@ -33,14 +36,16 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
 
 | Command | What it does |
 | --- | --- |
-| `npm run typecheck` | `tsc --noEmit` over client, server, shared and the configs |
+| `npm run typecheck` | `tsc --noEmit` over client, server, shared, the `.ts` in scripts and the configs |
 | `npm test` | Vitest, once (`npm run test:watch` to re-run on edits) |
 | `npm run build` | typecheck, `vite build` to `dist/`, then the server bundled into `dist-server/` (`scripts/build-server.mjs`) |
+| `npm run test:e2e` | Playwright (`e2e/`, `playwright.config.ts`): builds, boots a demo office on `E2E_PORT` (default 4399; set it to your reserved port) with a temp `SWARM_HOME`, and smoke-tests it in headless Chromium |
 | `node scripts/smoke-package.mjs` | after a build: packs the npm package, installs it into a temp folder and boots its demo |
 | `node --import tsx server/index.ts --demo` | a demo office (see SAFETY for the env it needs) |
 
 CI (`.github/workflows/ci.yml`): Node 24 on `ubuntu-latest` and `windows-latest`, `npm ci` → `typecheck` → `test` →
-`build` → package smoke test, for every PR and push to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`. All three must pass locally
+`build` → package smoke test, for every PR and push to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`; a separate `e2e`
+job on `ubuntu-latest` runs `npm run test:e2e`. All three must pass locally
 before you open a PR.
 
 ## Code map
@@ -63,9 +68,16 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `previews.ts`: one preview per floor: ports (6300 + floor), statuses, config validation.
 - `previewRunner.ts`: checks out, installs and runs a floor's app in its preview worktree; kills the process tree.
 - `httpError.ts`: `HttpError(status, message)`.
+- `officeUpdate.ts`: the office's self-update: the drain decision, the launcher contract (IPC, `last-update.json`).
+- `pacing.ts`: pacing new work after Claude's usage warnings: the start/skip decision and the usage state.
 
 The `cubefarm` command (`bin/cubefarm.js`, plain JS): checks Node/git/gh/Claude login, starts `dist-server/index.js`,
 opens the browser; `login` and `doctor` subcommands.
+
+The launcher (`scripts/office.mjs`, plain JS; `npm run dev` / `demo` / `start`): runs the server (plus Vite with
+`--dev`, watching `server/` and `shared/`) with `SWARM_LAUNCHER=1` and an IPC channel, and applies office updates:
+stop, fast-forward, install/build, restart, roll back on failure, `<SWARM_HOME>/last-update.json`. Its pure decisions
+are in `scripts/officeSteps.mjs` (tested in `officeSteps.test.ts`).
 
 Shared (`shared/`, imported by both sides):
 - `types.ts`: the REST/websocket contract (`WorldSnapshot`, `ServerEvent`, views, settings).
@@ -104,7 +116,7 @@ Client (`client/`, Vite root; React 19, R3F, drei, zustand):
 
 ## Tests
 
-- Vitest, `*.test.ts` next to the code, anywhere under `client/`, `server/` or `shared/`
+- Vitest, `*.test.ts` next to the code, anywhere under `client/`, `server/`, `shared/` or `scripts/`
   (e.g. `shared/issues.test.ts`, `client/src/world/layout.test.ts`, `server/ceo.test.ts`). Config: `vitest.config.ts`.
 - Test pure functions directly; extract logic into pure helpers rather than mocking. No network, no `gh`, no Claude
   sessions, no real `~/.cubefarm`: `npm test` already points `SWARM_HOME` at a temp folder and `SWARM_PORT` at 0.

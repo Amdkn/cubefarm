@@ -1,7 +1,22 @@
 import { useMemo } from 'react';
 import { repoOnFloor, usePhoneBadge, useStore } from '../store';
 import { CEO_ID } from '../../../shared/types';
+import { HeldHint } from './HeldHint';
 import { WorkersPanel } from './WorkersPanel';
+import { officeUpdateChip } from '../officeUpdate';
+
+/** While the office is on its way to updating itself (or restarting to do it); opens the console's Office row. */
+function OfficeUpdateChip() {
+  const text = useStore((s) => (s.restarting ? '⟳ Office restarting…' : officeUpdateChip(s.officeUpdate)));
+  const overlay = useStore((s) => s.overlay);
+  const openOverlay = useStore((s) => s.openOverlay);
+  if (!text || overlay?.kind === 'manager') return null;
+  return (
+    <button className="office-chip" onClick={() => openOverlay({ kind: 'manager', tab: 'floors' })} title="The office is updating itself. Open the manager's console">
+      {text}
+    </button>
+  );
+}
 
 /** The phone in your pocket: always one key (or click) away, with a badge when the CEO is waiting on you. */
 function PhoneButton() {
@@ -29,11 +44,13 @@ export function HUD() {
   const agents = useStore((s) => s.agents);
   const settings = useStore((s) => s.settings);
   const connected = useStore((s) => s.connected);
+  const restarting = useStore((s) => s.restarting);
   const demo = useStore((s) => s.demo);
   const user = useStore((s) => s.user);
   const ghReady = useStore((s) => s.ghReady);
   const ghError = useStore((s) => s.ghError);
   const focus = useStore((s) => s.focus);
+  const held = useStore((s) => s.held);
   const overlay = useStore((s) => s.overlay);
   const locked = useStore((s) => s.locked);
   const started = useStore((s) => s.started);
@@ -63,7 +80,7 @@ export function HUD() {
 
       <div className="hud-status">
         {demo && <span className="pill pill-demo">DEMO</span>}
-        <span className={`pill ${connected ? 'pill-ok' : 'pill-bad'}`}>{connected ? '● live' : '○ reconnecting'}</span>
+        <span className={`pill ${connected ? 'pill-ok' : restarting ? 'pill-demo' : 'pill-bad'}`}>{connected ? '● live' : restarting ? '○ restarting' : '○ reconnecting'}</span>
         <span className="pill">
           ⚙️ {settings.sessionLimit ? `${running}/${settings.sessionLimit}` : running} sessions
         </span>
@@ -71,15 +88,18 @@ export function HUD() {
       </div>
 
       <WorkersPanel />
+      <OfficeUpdateChip />
 
       {!ghReady && ghError && <div className="hud-banner">⚠️ {ghError}</div>}
 
       {started && !overlay && !travel && <div className={`crosshair ${focus ? 'crosshair-hot' : ''}`} />}
       {started && !overlay && focus && (
         <div className="hud-hint">
-          <kbd>E</kbd> / <kbd>Click</kbd> {focus.label}
+          <kbd>E</kbd> {!held && <>/ <kbd>Click</kbd> </>}
+          {focus.label}
         </div>
       )}
+      {started && !overlay && !travel && <HeldHint />}
       {started && !overlay && !locked && !travel && <div className="hud-resume">Click to look around</div>}
       {started && !(settings.setupDone && settings.tutorialStep >= 0) && (
         <div className="hud-help">

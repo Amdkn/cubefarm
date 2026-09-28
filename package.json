@@ -32,16 +32,14 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "concurrently -k -n server,client -c magenta,cyan \"npm:dev:server\" \"npm:dev:client\"",
-    "demo": "concurrently -k -n server,client -c magenta,cyan \"npm:demo:server\" \"npm:dev:client\"",
-    "dev:server": "node scripts/dev-server.mjs",
-    "demo:server": "node scripts/dev-server.mjs --demo",
-    "dev:client": "vite",
+    "dev": "node scripts/office.mjs --dev",
+    "demo": "node scripts/office.mjs --dev --demo",
     "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/build-server.mjs",
-    "start": "node bin/cubefarm.js",
+    "start": "node scripts/office.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "prepublishOnly": "npm test && npm run build"
   },
   "dependencies": {
@@ -52,6 +50,7 @@
   },
   "devDependencies": {
     "@dimforge/rapier3d-compat": "0.19.2",
+    "@playwright/test": "1.56.1",
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",
     "@react-three/rapier": "^2.2.0",

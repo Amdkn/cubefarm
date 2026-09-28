@@ -8,6 +8,11 @@ import { interactables } from './interact';
 import { LOOK_RADIANS_PER_PX, createLookFilter, filterLookDelta, resetLookFilter, useLookPrefs } from './look';
 import { confirmDialog, isConfirmOpen } from '../ui/Confirm';
 import { footstepsFollow, getAudioPrefs, toggleMute } from '../ui/sfx';
+import { dropHeld, startCharge, throwHeld, walk } from './toys/hands';
+import { watchLookLock } from './lookLock';
+import { pokeToy } from './toys/poke';
+import { isBlasterId } from './toys/darts';
+import { reloadHeld, takeBlaster } from './toys/gun';
 
 let canvasEl: HTMLCanvasElement | null = null;
 
@@ -16,6 +21,9 @@ let canvasEl: HTMLCanvasElement | null = null;
 const QUIET_MS = 400;
 let quietUntil = 0;
 const QUIET_EVENTS = ['mousedown', 'mouseup', 'click', 'dblclick'] as const;
+const hushMouse = () => {
+  quietUntil = performance.now() + QUIET_MS;
+};
 
 /** Grab the mouse for looking around. Must be called from a click handler. */
 export function requestLook() {
@@ -44,6 +52,18 @@ const lookDiag = { dropped: 0, skipped: 0 };
 export function runFocusAction(focus: Focus, via: 'key' | 'click' = 'key') {
   const s = useStore.getState();
   quietUntil = performance.now() + QUIET_MS;
+  if (focus.action.kind === 'pickup' && isBlasterId(focus.action.toyId)) {
+    takeBlaster(focus.action.toyId);
+    return;
+  }
+  if (focus.action.kind === 'pickup') {
+    s.setHeld({ kind: 'ball', id: focus.action.toyId }); // already holding one? the toy world swaps them
+    return;
+  }
+  if (focus.action.kind === 'poke') {
+    pokeToy(focus.action.toyId);
+    return;
+  }
   if (focus.action.kind === 'hire') {
     const { repoId, role } = focus.action;
     const hire = () =>
@@ -110,13 +130,19 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
 
   useEffect(() => {
     canvasEl = gl.domElement;
-    // Left button only. If the mouse is already captured, act on the crosshair's target (like E);
-    // otherwise this press just captures the mouse, so the click that locks never also acts.
+    // Left button only. If the mouse is already captured, use what you're holding (winding up a throw until
+    // the button comes up) or, empty-handed, act on the crosshair's target (like E). Otherwise this press
+    // just captures the mouse, so the click that locks never also acts.
     const onMouseDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
       if (document.pointerLockElement !== gl.domElement) return requestLook();
       const s = useStore.getState();
-      if (s.started && !s.overlay && !s.travel && s.focus && !isConfirmOpen()) runFocusAction(s.focus, 'click');
+      if (!s.started || s.overlay || s.travel || isConfirmOpen()) return;
+      if (s.held) startCharge();
+      else if (s.focus) runFocusAction(s.focus, 'click');
+    };
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button === 0) throwHeld();
     };
     const onQuietMouse = (e: MouseEvent) => {
       if (performance.now() >= quietUntil) return;
@@ -125,7 +151,9 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
     };
     const onLockChange = () => {
       resetLookFilter(lookFilter);
-      useStore.getState().setLocked(document.pointerLockElement === gl.domElement);
+      const locked = document.pointerLockElement === gl.domElement;
+      if (!locked) dropHeld(); // Esc: you've stepped away, so let go rather than leave it hanging in the air
+      useStore.getState().setLocked(locked);
     };
     const onMove = (e: MouseEvent) => {
       if (document.pointerLockElement !== gl.domElement || !document.hasFocus()) return;
@@ -147,24 +175,38 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
       }
       if (s.overlay || !s.started || isConfirmOpen()) return;
       keys.current.add(e.code);
+      // E always acts on the crosshair's target, even with your hands full (a panel opening drops the ball).
       if (e.code === 'KeyE' && !e.repeat && s.focus) runFocusAction(s.focus);
+      if (e.code === 'KeyF' && !e.repeat && !s.travel) startCharge();
+      if (e.code === 'KeyG' && !e.repeat) dropHeld();
+      if (e.code === 'KeyR' && !e.repeat && !s.travel) reloadHeld();
       if (e.code === 'KeyH') s.openOverlay({ kind: 'help' });
       if (e.code === 'KeyP') {
         e.preventDefault(); // don't type the "p" into the phone's message box
         s.openOverlay({ kind: 'phone', tab: pendingRequests(s.requests).length && !unreadMessages(s.messages, s.phoneReadAt) ? 'hires' : 'chat' });
       }
     };
-    const onKeyUp = (e: KeyboardEvent) => keys.current.delete(e.code);
-    const onBlur = () => keys.current.clear();
+    const onKeyUp = (e: KeyboardEvent) => {
+      keys.current.delete(e.code);
+      if (e.code === 'KeyF') throwHeld();
+    };
+    const onBlur = () => {
+      keys.current.clear();
+      useStore.getState().setCharge(null); // the button's release would be missed
+    };
     gl.domElement.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mouseup', onMouseUp);
     for (const type of QUIET_EVENTS) window.addEventListener(type, onQuietMouse, true);
     document.addEventListener('pointerlockchange', onLockChange);
     document.addEventListener('mousemove', onMove);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
+    const stopLookLock = watchLookLock(requestLook, hushMouse);
     return () => {
+      stopLookLock();
       gl.domElement.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mouseup', onMouseUp);
       for (const type of QUIET_EVENTS) window.removeEventListener(type, onQuietMouse, true);
       document.removeEventListener('pointerlockchange', onLockChange);
       document.removeEventListener('mousemove', onMove);
@@ -186,6 +228,8 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
     const speed = k.has('ShiftLeft') || k.has('ShiftRight') ? 6.5 : 3.6;
     const { yaw, pitch } = look.current;
     let moving = false;
+    walk.x = 0;
+    walk.z = 0;
     if ((fwd || strafe) && !s.travel) {
       const len = Math.hypot(fwd, strafe);
       const sin = Math.sin(yaw);
@@ -193,6 +237,10 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
       const dx = ((-sin * fwd + cos * strafe) / len) * speed * dt;
       const dz = ((-cos * fwd - sin * strafe) / len) * speed * dt;
       const p = collide(camera.position.x + dx, camera.position.z + dz, colliders);
+      if (dt > 0) {
+        walk.x = (p.x - camera.position.x) / dt;
+        walk.z = (p.z - camera.position.z) / dt;
+      }
       camera.position.x = p.x;
       camera.position.z = p.z;
       moving = true;
