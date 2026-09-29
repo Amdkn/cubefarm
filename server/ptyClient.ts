@@ -223,7 +223,9 @@ export function spawnPty(file: string, args: string[], o: PtyOptions, meta: unkn
     return p;
   }
   if (!nodePty) throw new Error('the terminal module could not be loaded on this machine');
-  const p = nodePty.spawn(file, args, { name: 'xterm-256color', cols: o.cols, rows: o.rows, cwd: o.cwd, env: o.env });
+  // useConptyDll: Windows' own console host lingers after each CLI exits (one conhost.exe per terminal); the one
+  // node-pty ships goes with its terminal. Ignored elsewhere.
+  const p = nodePty.spawn(file, args, { name: 'xterm-256color', cols: o.cols, rows: o.rows, cwd: o.cwd, env: o.env, useConptyDll: true });
   return {
     get pid() {
       return p.pid;

@@ -47,6 +47,8 @@ interface Held {
   backlog: string[];
   bytes: number;
   exit: number | null;
+  /** The office stopped it: nobody needs to hear how it ended. */
+  killed: boolean;
 }
 const held = new Map<string, Held>();
 let office: net.Socket | null = null;
@@ -78,12 +80,14 @@ function killTree(pid: number) {
 function start(m: Extract<ToHost, { op: 'spawn' }>) {
   let proc: nodePty.IPty;
   try {
-    proc = nodePty.spawn(m.file, m.args, { name: 'xterm-256color', cols: m.cols, rows: m.rows, cwd: m.cwd, env: m.env });
+    // Windows' own console host lingers after each CLI exits (one conhost.exe per terminal, forever in a keeper that
+    // outlives restarts); the one node-pty ships goes with its terminal.
+    proc = nodePty.spawn(m.file, m.args, { name: 'xterm-256color', cols: m.cols, rows: m.rows, cwd: m.cwd, env: m.env, useConptyDll: true });
   } catch (err) {
     send({ op: 'failed', id: m.id, error: (err as Error).message });
     return;
   }
-  const h: Held = { proc, meta: m.meta, attached: true, backlog: [], bytes: 0, exit: null };
+  const h: Held = { proc, meta: m.meta, attached: true, backlog: [], bytes: 0, exit: null, killed: false };
   held.set(m.id, h);
   send({ op: 'spawned', id: m.id, pid: proc.pid });
   proc.onData((data) => {
@@ -94,10 +98,9 @@ function start(m: Extract<ToHost, { op: 'spawn' }>) {
   });
   proc.onExit(({ exitCode }) => {
     h.exit = exitCode;
-    if (h.attached && office) {
-      send({ op: 'exit', id: m.id, code: exitCode });
-      held.delete(m.id);
-    }
+    quietly(() => proc.kill()); // on Windows the terminal's console host (conhost.exe) outlives the CLI until then
+    if (h.attached && office) send({ op: 'exit', id: m.id, code: exitCode });
+    if ((h.attached && office) || h.killed) held.delete(m.id);
   });
 }
 
@@ -199,6 +202,7 @@ function connected(sock: net.Socket) {
         if (h) h.meta = m.meta;
         return;
       case 'kill':
+        if (h) h.killed = true;
         if (h?.exit === null) killTree(h.proc.pid);
         else if (h) held.delete(m.id);
         return;

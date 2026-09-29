@@ -3,7 +3,8 @@ import type { ToyFloor } from './balls';
 import './probe';
 
 // The physics engine is a WASM module, so the toys live in their own chunk behind their own Suspense:
-// the floor renders straight away and the toys drop in once Rapier is ready.
+// the floor renders straight away and the toys drop in once Rapier is ready. If it can't load, toys stay off; an
+// error while they run only takes this floor's toys away (each floor remounts them, so the next one has them again).
 
 let broken = false;
 function giveUp(err: unknown) {
@@ -26,12 +27,12 @@ const ToyWorld = lazy(async (): Promise<{ default: ComponentType<{ floor: ToyFlo
 });
 
 class ToyGuard extends Component<{ children: ReactNode }, { failed: boolean }> {
-  state = { failed: broken };
+  state = { failed: false };
   static getDerivedStateFromError() {
     return { failed: true };
   }
   componentDidCatch(err: unknown) {
-    giveUp(err);
+    console.error('Office toys stopped on this floor after an error (the next floor gets fresh ones):', err);
   }
   render() {
     return this.state.failed ? null : this.props.children;

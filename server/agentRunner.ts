@@ -162,7 +162,7 @@ export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 
 function rel(cwd: string, p: unknown) {
   const s = String(p ?? '');
   if (!s) return '';
-  const r = path.relative(cwd, s);
+  const r = path.relative(cwd, path.resolve(cwd, s)); // a relative path (Codex's patches) is the agent's, not ours
   return r && !r.startsWith('..') ? r.replaceAll('\\', '/') : s;
 }
 

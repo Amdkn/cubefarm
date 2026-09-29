@@ -25,10 +25,21 @@ export const HitTargets = memo(function HitTargets({ floor, groups }: { floor: T
   const speeds = useMemo(() => new Map<number, number>(), []);
   const tmp = useMemo(() => ({ p: new THREE.Vector3(), q: new THREE.Quaternion(), found: [] as Collider[] }), []);
 
+  // The sensors still in the world. A RigidBody's ref only hears about its body being created, not removed (someone
+  // leaves their desk, the floor changes), and reading a removed body makes Rapier panic, which stops every toy.
+  const live = () => {
+    for (const [t, b] of bodies.current) {
+      if (b.isValid()) continue;
+      bodies.current.delete(t);
+      inside.current.delete(t);
+    }
+    return bodies.current;
+  };
+
   // People sit still, so a sensor only moves when its chair did (or on its first frame).
   useFrame(() => {
     const { p, q } = tmp;
-    for (const [t, b] of bodies.current) {
+    for (const [t, b] of live()) {
       t.obj.getWorldPosition(p);
       t.obj.getWorldQuaternion(q);
       const at = b.translation();
@@ -56,7 +67,7 @@ export const HitTargets = memo(function HitTargets({ floor, groups }: { floor: T
     const held = useStore.getState().held;
     const heldBall = held?.kind === 'ball' ? held.id : null;
     const found = tmp.found;
-    for (const [t, b] of bodies.current) {
+    for (const [t, b] of live()) {
       if (!b.numColliders()) continue;
       const sensor = b.collider(0);
       found.length = 0;
@@ -82,10 +93,6 @@ export const HitTargets = memo(function HitTargets({ floor, groups }: { floor: T
       key={t.key}
       ref={(b: RapierRigidBody | null) => {
         if (b) bodies.current.set(t, b);
-        else {
-          bodies.current.delete(t);
-          inside.current.delete(t);
-        }
       }}
       type="kinematicPosition"
       colliders={false}
