@@ -1,13 +1,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import type { Request, Response } from 'express';
-import type { IPty } from '@lydell/node-pty';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
-import { cliLabel, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
+import { cliLabel, CODEX_HOOK_SOURCE, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
+import { adoptPty, discardPty, hooksReady, keeperHookUrl, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
   clip,
   describeTool,
@@ -32,15 +31,13 @@ import type { AgentCli } from '../shared/types.ts';
 //
 // Claude Code reports through HTTP hooks passed with --settings: every tool call (PreToolUse also approves it, so the
 // CLI never stops to ask), each finished turn (Stop, with the final text), failures (StopFailure) and, through its
-// status line, cost and usage limits. Codex (notify) and OpenCode (a plugin) only say when a turn ends.
+// status line, cost and usage limits. Codex says when a turn ends (notify) and, once the manager trusts the office's
+// hooks in its /hooks, reports its steps through them too. OpenCode's plugin only says when a turn ends.
+//
+// The CLIs run in the office's terminal keeper (ptyClient.ts) and call their hooks there, so an office restart doesn't
+// stop them: the office picks them up again when it's back (reconnectClis).
 
-const pty = await import('@lydell/node-pty').catch((err: unknown) => {
-  console.warn(`  terminals unavailable: ${(err as Error).message}`);
-  return null;
-});
-
-/** The native terminal module loaded, so the terminal runtime can run. */
-export const terminalsAvailable = pty !== null;
+export { terminalsAvailable };
 
 const SESSIONS_DIR = path.join(HOME_DIR, 'sessions');
 const BIN_DIR = path.join(HOME_DIR, 'bin');
@@ -107,6 +104,7 @@ function writeHelpers() {
   fs.mkdirSync(BIN_DIR, { recursive: true });
   fs.writeFileSync(path.join(BIN_DIR, 'statusline.cjs'), STATUSLINE_SOURCE);
   fs.writeFileSync(path.join(BIN_DIR, 'notify.cjs'), NOTIFY_SOURCE);
+  fs.writeFileSync(path.join(BIN_DIR, 'codex-hook.cjs'), CODEX_HOOK_SOURCE);
   fs.writeFileSync(path.join(BIN_DIR, 'opencode-plugin.mjs'), OPENCODE_PLUGIN_SOURCE);
   helpersWritten = true;
 }
@@ -155,29 +153,18 @@ function quietly(fn: () => void) {
   }
 }
 
-function killTree(proc: IPty) {
-  if (process.platform === 'win32') {
-    const tk = spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    tk.once('error', () => undefined);
-    return;
-  }
-  try {
-    process.kill(-proc.pid, 'SIGTERM'); // the CLI leads its own session: take its MCP servers and tools with it
-  } catch {
-    proc.kill();
-  }
-}
-
 // ---------- CLIs that outlive their session ----------
 
 /**
  * A CLI running in an agent's terminal. It can outlive the office session that started it: when a developer's task
- * is done their CLI waits at its prompt, so the manager can keep using it, and a follow-up picks it up again.
+ * is done their CLI waits at its prompt, so the manager can keep using it, and a follow-up picks it up again. It also
+ * outlives an office restart, held by the terminal keeper.
  */
 interface LiveCli {
+  agentId: string;
   cli: AgentCli;
   term: AgentTerminal;
-  proc: IPty | null;
+  proc: Pty | null;
   token: string;
   dir: string;
   resumeId: string | null; // the session a follow-up resumes
@@ -189,6 +176,8 @@ interface LiveCli {
   idleTimer?: NodeJS.Timeout;
 }
 const lives = new Map<AgentTerminal, LiveCli>();
+/** How to trust Codex's hooks was said once this run (Codex asks at the start of every session until they are). */
+let hooksHinted = false;
 /** A CLI left at its prompt this long is closed; its session can still be resumed. */
 const IDLE_MS = 30 * 60_000;
 
@@ -205,10 +194,94 @@ function endLive(live: LiveCli) {
   routes.delete(live.token);
   live.term.releaseIdle = null;
   live.term.bind(null);
-  if (live.proc) killTree(live.proc);
+  live.proc?.kill();
   live.proc = null;
   live.term.note(`── ${cliLabel(live.cli)} session ended ──`);
   fs.rm(live.dir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
+}
+
+/** What the keeper holds with a CLI's terminal, so the office can pick it up again after a restart. */
+interface CliMeta {
+  agentId: string;
+  cli: AgentCli;
+  token: string;
+  dir: string;
+  resumeId: string | null;
+  /** An office session was driving it (not waiting at its prompt). */
+  busy: boolean;
+}
+
+const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session });
+const remember = (l: LiveCli) => l.proc?.setMeta(metaOf(l));
+
+/** A CLI is running in its terminal: its output, its keys and its hooks are connected. */
+function wire(l: LiveCli, office?: OfficeTools) {
+  const p = l.proc!;
+  lives.set(l.term, l);
+  routes.set(l.token, { hook: (b) => (l.session ? l.session.hook(b) : idleHook(l, b)), office });
+  l.term.bind({ write: (d) => quietly(() => p.write(d)), resize: (c, r) => quietly(() => p.resize(c, r)) });
+  p.onData((data) => {
+    if (lives.get(l.term) === l) l.term.write(data);
+  });
+  p.onExit((code) => {
+    l.proc = null;
+    if (lives.get(l.term) !== l) return; // already replaced or closed
+    if (l.session) l.session.exited(code);
+    else endLive(l); // quit while waiting at its prompt
+  });
+}
+
+/** The task is done but the CLI stays at its prompt for the manager (or a follow-up), for a while. */
+function waitAtPrompt(l: LiveCli) {
+  clearTimeout(l.idleTimer);
+  l.idleTimer = setTimeout(() => endLive(l), IDLE_MS);
+  l.term.releaseIdle = () => endLive(l);
+  remember(l);
+}
+
+export interface ReconnectedCli {
+  agentId: string;
+  cli: AgentCli;
+  resumeId: string | null;
+  /** It was working on a task: the office should follow its session again. */
+  busy: boolean;
+}
+
+/**
+ * The office started: connect to the terminal keeper and take back the CLIs it kept running through the restart, each
+ * into its agent's terminal. They wait at their prompt until the office follows their session again (busy ones) or
+ * the manager uses them. Ones whose agent is gone, or that exited while the office was away, are stopped: the office
+ * resumes those sessions itself. Call hooksReady() once the busy ones are followed again.
+ */
+export async function reconnectClis(terminalFor: (agentId: string) => AgentTerminal | null): Promise<ReconnectedCli[]> {
+  const held = await startKeeper(HOME_DIR, handleHook);
+  const back: ReconnectedCli[] = [];
+  for (const h of held) {
+    const meta = (h.meta ?? {}) as Partial<CliMeta>;
+    const term = meta.agentId ? terminalFor(meta.agentId) : null;
+    if (h.exit !== null || !term || lives.has(term) || !isCli(meta.cli) || !meta.token || !meta.dir || !meta.agentId) {
+      discardPty(h);
+      continue;
+    }
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, proc: adoptPty(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null };
+    wire(l);
+    waitAtPrompt(l);
+    // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
+    setTimeout(() => quietly(() => (l.proc?.resize(term.cols - 1, term.rows), l.proc?.resize(term.cols, term.rows))), 500);
+    back.push({ agentId: l.agentId, cli: l.cli, resumeId: l.resumeId, busy: !!meta.busy });
+  }
+  return back;
+}
+
+export { hooksReady };
+
+/**
+ * The office is stopping. On a restart its CLIs carry on in the terminal keeper, which holds their output and hooks
+ * until it's back; when it quits for good they stop with it.
+ */
+export function releaseClis(restart: boolean) {
+  if (!restart) for (const l of [...lives.values()]) endLive(l);
+  leaveKeeper();
 }
 
 /** A CLI waiting at its prompt: what the manager types there becomes a follow-up. */
@@ -231,13 +304,15 @@ function idleHook(live: LiveCli, b: Record<string, unknown>): Record<string, unk
 
 export function startCliSession(opts: SessionOptions, callbacks: SessionCallbacks): SessionHandle {
   const term = opts.terminal!;
-  const cli = opts.cli ?? 'claude';
-  const label = cliLabel(cli);
-  // A follow-up to the session a CLI is still waiting in picks that CLI up again; anything else replaces it.
+  // A follow-up to the session a CLI is still waiting in picks that CLI up again, and so does an office that restarted
+  // while it worked (reattach); anything else replaces it.
   const prev = lives.get(term);
-  const adopt = !!prev?.proc && !prev.session && prev.cli === cli && !!opts.resumeSessionId && prev.resumeId === opts.resumeSessionId;
+  const waiting = !!prev?.proc && !prev.session;
+  const adopt = waiting && (!!opts.reattach || (prev!.cli === (opts.cli ?? 'claude') && !!opts.resumeSessionId && prev!.resumeId === opts.resumeSessionId));
   if (prev && !adopt) endLive(prev);
   let live: LiveCli | null = adopt ? prev! : null;
+  const cli = live?.cli ?? opts.cli ?? 'claude';
+  const label = cliLabel(cli);
 
   const token = crypto.randomUUID();
   const sessionId = opts.resumeSessionId ?? crypto.randomUUID();
@@ -289,13 +364,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     clearInterval(screenTimer);
     clearInterval(shotTimer);
     collectShots(true);
+    if (term.onInput === watchKeys) term.onInput = null;
     const l = live;
     if (l && lives.get(term) === l) {
       l.session = null;
-      if (keep && opts.keepAlive && l.proc) {
-        l.idleTimer = setTimeout(() => endLive(l), IDLE_MS);
-        term.releaseIdle = () => endLive(l);
-      } else endLive(l);
+      if (keep && opts.keepAlive && l.proc) waitAtPrompt(l);
+      else endLive(l);
     }
     cb.tool(null);
     cb.finished({ ...r, costUsd, turns });
@@ -312,6 +386,23 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     begun = true;
     clearTimeout(finishTimer);
   };
+
+  /** The turn was interrupted from the terminal: the office treats it like Stop, and the CLI waits for the manager. */
+  const interrupted = () => finish({ ok: false, text: lastText, errors: ['Interrupted in the terminal'], interrupted: true }, true);
+
+  /** Esc typed in the terminal while the agent works: if the CLI then says it interrupted the turn, it's over. */
+  const watchKeys = (data: string) => {
+    if (data !== '\x1b' || done || !begun) return;
+    const before = interruptions(term.screen());
+    let looks = 0;
+    const look = () => {
+      if (done) return;
+      if (interruptions(term.screen()) > before) interrupted();
+      else if (++looks < 4) setTimeout(look, 1000);
+    };
+    setTimeout(look, 800);
+  };
+  term.onInput = watchKeys;
 
   const assistantLines = (text: string): LogEntry[] => {
     const lines = text.split('\n');
@@ -359,7 +450,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         if (sub) return {};
         const name = toolNames.get(String(b.tool_use_id ?? '')) ?? String(b.tool_name ?? '');
         const out = toolOutput(b.tool_response);
-        for (const img of out.images) cb.screenshot(Buffer.from(img.data, 'base64'), img.mime);
+        // Codex's unnamed screenshots are collected from the browser's folder (its hooks may not be trusted yet).
+        if (cli === 'claude') for (const img of out.images) cb.screenshot(Buffer.from(img.data, 'base64'), img.mime);
         const saved = name === 'mcp__playwright__browser_take_screenshot' && !out.images.length ? screenshotFile(opts.cwd, out.text) : null;
         if (saved) cb.screenshot(saved.data, saved.mime);
         if (name.startsWith('mcp__playwright__')) {
@@ -372,6 +464,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         return {};
       }
       case 'UserPromptSubmit': {
+        if (sub) return {};
         busy();
         const prompt = String(b.prompt ?? '').trim();
         const i = officePrompts.findIndex((p) => p.slice(0, 60) === prompt.slice(0, 60));
@@ -402,6 +495,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       }
       case 'StatusLine':
         return onStatus(b);
+      case 'Interrupt': // Codex: Esc in its terminal
+        if (!sub) interrupted();
+        return {};
       // Codex's notify program and the OpenCode plugin
       case 'TurnComplete': {
         const thread = typeof b.session_id === 'string' ? b.session_id : '';
@@ -413,7 +509,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         }
         if (thread) {
           cb.sessionId(thread);
-          if (live) live.resumeId = thread;
+          if (live && live.resumeId !== thread) {
+            live.resumeId = thread;
+            remember(live);
+          }
         }
         const text = String(b.last_assistant_message ?? '').trim();
         turns += 1;
@@ -462,23 +561,31 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     term.releaseIdle = null;
     live.session = { hook, exited };
     Object.assign(live, { statusLine });
+    remember(live);
     if (live.resumeId) cb.sessionId(live.resumeId);
-    if (opts.typed) busy(); // the manager typed it at the prompt: it's already running
+    if (opts.typed || opts.reattach) busy(); // typed at the prompt, or still at it after a restart: already running
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
+    return handle;
+  }
+  if (opts.reattach) {
+    // Its CLI didn't make it through the restart after all.
+    setTimeout(() => finish({ ok: false, text: '', errors: [`${label} stopped while the office restarted.`] }), 0);
     return handle;
   }
 
   // ---------- a new CLI: files for this session, and the command line ----------
 
   const cmd = commandFor(cli);
-  if (!pty || !cmd) {
-    const why = !pty ? 'the terminal module could not be loaded on this machine' : `${label} isn't installed (no "${cli}" on PATH)`;
+  if (!terminalsAvailable || !cmd) {
+    const why = !terminalsAvailable ? 'the terminal module could not be loaded on this machine' : `${label} isn't installed (no "${cli}" on PATH)`;
     setTimeout(() => finish({ ok: false, text: '', errors: [`Could not start ${label}: ${why}.`] }), 0);
     return handle;
   }
 
-  const hookUrl = `${officeUrl}/api/hooks/${token}`;
+  // Through the keeper, a hook waits while the office restarts instead of failing: the CLIs allow it longer.
+  const keeper = keeperHookUrl();
+  const hookUrl = `${keeper ?? officeUrl}/api/hooks/${token}`;
   const browser = opts.browserTesting ? playwrightServer(path.join(dir, 'browser')) : null;
   let prompt = opts.prompt;
   if (opts.outputSchema) {
@@ -489,7 +596,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     writeHelpers();
     fs.mkdirSync(dir, { recursive: true });
     const settings = {
-      hooks: Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [{ type: 'http', url: hookUrl, timeout: 30 }] }]])),
+      hooks: Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [{ type: 'http', url: hookUrl, timeout: keeper ? 120 : 30 }] }]])),
       statusLine: { type: 'command', command: `${shellArg(process.execPath)} ${shellArg(path.join(BIN_DIR, 'statusline.cjs'))} ${shellArg(hookUrl)}`, padding: 0 },
     };
     const servers: Record<string, unknown> = {};
@@ -508,7 +615,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     setTimeout(() => finish({ ok: false, text: '', errors: [`Could not prepare ${label}: ${(err as Error).message}`] }), 0);
     return handle;
   }
-  officePrompts.push(opts.prompt.trim());
+  officePrompts.push(prompt.trim()); // as given: a long one is a pointer to its file
   launched.push(prompt.trim());
 
   const launch = launchArgs(cli, {
@@ -524,6 +631,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     additionalDirectories: opts.additionalDirectories,
     files,
     notify: { script: path.join(BIN_DIR, 'notify.cjs'), url: hookUrl },
+    codexHook: path.join(BIN_DIR, 'codex-hook.cjs'),
     plugin: pathToFileURL(path.join(BIN_DIR, 'opencode-plugin.mjs')).href,
     browser,
   });
@@ -541,43 +649,38 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   if (cli === 'claude') cb.sessionId(sessionId);
   term.note(`── ${label}${opts.label ? ` · ${opts.label}` : ''} ──`);
-  let p: IPty;
+  const resumeId = cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null);
+  const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, proc: null, token, dir, resumeId, statusLine, shots: new Set(), session: { hook, exited } };
+  let p: Pty;
   try {
-    p = pty.spawn(cmd.file, [...cmd.args, ...launch.args], { name: 'xterm-256color', cols: term.cols, rows: term.rows, cwd: opts.cwd, env });
+    p = spawnPty(cmd.file, [...cmd.args, ...launch.args], { cols: term.cols, rows: term.rows, cwd: opts.cwd, env }, metaOf(l));
   } catch (err) {
     setTimeout(() => finish({ ok: false, text: '', errors: [`Could not start ${label}: ${(err as Error).message}`] }), 0);
     return handle;
   }
-  const l: LiveCli = { cli, term, proc: p, token, dir, resumeId: cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null), statusLine, shots: new Set(), session: { hook, exited } };
+  l.proc = p;
   live = l;
-  lives.set(term, l);
+  wire(l, opts.office);
   shotTimer = setInterval(collectShots, 2000);
-  routes.set(token, { hook: (b) => (l.session ? l.session.hook(b) : idleHook(l, b)), office: opts.office });
-  term.bind({ write: (d) => quietly(() => p.write(d)), resize: (c, r) => quietly(() => p.resize(c, r)) });
-
-  p.onData((data) => {
-    if (lives.get(term) === l) term.write(data);
-  });
-  p.onExit(({ exitCode }) => {
-    l.proc = null;
-    if (lives.get(term) !== l) return; // already replaced or closed
-    if (l.session) l.session.exited(exitCode);
-    else endLive(l); // quit while waiting at its prompt
-  });
 
   // Starting up: answer the folder-trust question for the office's own worktrees (the answer that trusts it), and
   // say so when a CLI is waiting on something only the manager can do (signing in).
   screenTimer = setInterval(() => {
     if (done || Date.now() - started > BOOT_MS * 2) return clearInterval(screenTimer);
     const screen = term.screen();
-    const key = trustKeys < 8 && Date.now() - trustedAt > 3000 ? trustKey(screen) : null;
+    const review = hookReviewKey(screen);
+    const key = trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
     if (key === 'down') {
       trustKeys += 1;
       quietly(() => p.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
     } else if (key === 'enter') {
       trustKeys += 1;
       trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
-      log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
+      if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
+      else if (!hooksHinted) {
+        hooksHinted = true;
+        log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
+      }
       quietly(() => p.write('\r'));
     }
     if (!nudged.has('login') && /Not logged in|run \/login|Select login method|Sign in with ChatGPT|Please login|Invalid API key/i.test(screen)) {

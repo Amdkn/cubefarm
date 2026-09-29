@@ -40,6 +40,8 @@ export class AgentTerminal {
   releaseIdle: (() => void) | null = null;
   /** Something the manager typed at that waiting prompt: the office takes it on as a follow-up (true) or refuses. */
   onIdlePrompt: ((text: string) => boolean) | null = null;
+  /** Keys a viewer typed, after they went to the CLI (the runtime watches for Esc interrupting a turn). */
+  onInput: ((data: string) => void) | null = null;
   private term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS, scrollback: SCROLLBACK, allowProposedApi: true, scrollOnEraseInDisplay: true });
   private ser = new SerializeAddon();
   private viewers = new Map<WebSocket, { stale: boolean; queued: string[] | null }>();
@@ -151,8 +153,11 @@ export class AgentTerminal {
       } catch {
         return;
       }
-      if (msg.t === 'input' && typeof msg.data === 'string') this.sink?.write(msg.data.slice(0, 64 * 1024));
-      else if (msg.t === 'resize') {
+      if (msg.t === 'input' && typeof msg.data === 'string') {
+        const data = msg.data.slice(0, 64 * 1024);
+        this.sink?.write(data);
+        this.onInput?.(data);
+      } else if (msg.t === 'resize') {
         this.resize(msg.cols, msg.rows);
         for (const other of this.viewers.keys()) if (other !== ws) this.sendTo(other, { t: 'size', cols: this.cols, rows: this.rows });
       }

@@ -10,8 +10,9 @@ const out = path.join(root, 'dist-server');
 
 fs.rmSync(out, { recursive: true, force: true });
 await build({
-  entryPoints: [path.join(root, 'server', 'index.ts')],
-  outfile: path.join(out, 'index.js'),
+  // The terminal keeper (ptyHost) runs as a process of its own, started from the server's folder.
+  entryPoints: [path.join(root, 'server', 'index.ts'), path.join(root, 'server', 'ptyHost.ts')],
+  outdir: out,
   bundle: true,
   platform: 'node',
   format: 'esm',

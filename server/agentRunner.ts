@@ -33,6 +33,10 @@ export interface SessionOptions {
   keepAlive?: boolean;
   /** The prompt was typed at the CLI's prompt by the manager: it's already running, so it isn't sent again. */
   typed?: boolean;
+  /** Whose terminal it is (the terminal keeper holds this, for the office that picks the CLI up after a restart). */
+  agentId?: string;
+  /** Follow the session of the CLI still running in the terminal after the office restarted; start nothing. */
+  reattach?: boolean;
 }
 
 export interface LogEntry {
@@ -48,6 +52,8 @@ export interface SessionResult {
   turns: number;
   errors: string[];
   structured?: unknown;
+  /** The manager interrupted the turn in the agent's terminal (Esc). */
+  interrupted?: boolean;
 }
 
 export interface SessionCallbacks {
@@ -199,6 +205,11 @@ export function describeTool(cwd: string, name: string, input: Record<string, un
       return 'Update todo list';
     case 'ToolSearch':
       return `Load tools ${String(input.query ?? '').replace(/^select:/, '')}`;
+    case 'apply_patch': {
+      // Codex's file edits: "*** Add File: a.ts", "*** Update File: b.ts", "*** Delete File: c.ts"
+      const files = [...String(input.command ?? '').matchAll(/^\*\*\* (Add|Update|Delete) File: (.+)$/gm)].map((m) => `${m[1] === 'Update' ? '' : `${m[1].toLowerCase()} `}${rel(cwd, m[2].trim())}`);
+      return `Edit ${clip(files.join(', ') || 'files', 200)}`;
+    }
   }
   if (name.startsWith('mcp__playwright__')) {
     const action = name.replace('mcp__playwright__browser_', '').replace('mcp__playwright__', '');
@@ -256,6 +267,7 @@ const lineCount = (text: string) => text.replace(/\r/g, '').split('\n').filter((
 export function summariseResult(cwd: string, tool: string, text: string): LogEntry[] {
   // Claude Code-style one-liners for the chatty file tools
   if (tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') return [{ kind: 'result', text: '  ⎿ Updated' }];
+  if (tool === 'apply_patch' && /Success\. Updated the following files/.test(text)) return [{ kind: 'result', text: '  ⎿ Updated' }];
   if (tool === 'Write') return [{ kind: 'result', text: '  ⎿ Saved' }];
   if (tool === 'Read') return [{ kind: 'result', text: `  ⎿ Read ${lineCount(text)} lines` }];
   if (tool === 'Glob') return [{ kind: 'result', text: `  ⎿ Found ${lineCount(text)} files` }];

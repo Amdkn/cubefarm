@@ -8,7 +8,8 @@ import type { OfficeUpdateState } from '../shared/types.ts';
 // sessions finish) and then hands the update to the launcher (scripts/office.mjs), which pulls, installs, builds and
 // restarts it. Contract with the launcher:
 //   server → launcher  { type: 'office:update', from: '<full HEAD sha>' }   once drained
-//   launcher → server  { type: 'office:shutdown' }                          run shutdown(), then exit 0
+//   launcher → server  { type: 'office:shutdown', restart }                  run shutdown(), then exit 0
+//                      (restart: false when the office quits; agents' CLIs stop instead of waiting in the keeper)
 //   <SWARM_HOME>/last-update.json = { from, to, ok, error?, installed, built, at }, read and deleted on startup
 
 /** Sessions still running this long after draining started are stopped, and the update goes ahead. */

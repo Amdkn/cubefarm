@@ -495,13 +495,33 @@ export class Swarm {
       const tail = a.logTail ?? [];
       for (const l of tail) this.logSeq = Math.max(this.logSeq, l.id + 1);
       this.agentRt.set(a.id, { log: tail, pending: [], session: null, currentTool: null, browserUrl: null, screenshot: await loadScreen(a.id), shots: [], terminal: await this.loadTerminal(a.id) });
-      if (BUSY.includes(a.status)) {
-        a.status = 'stopped';
-        a.lastError = 'The swarm server restarted while this agent was working.';
-        interrupted.push(a);
-      }
     }
+    // CLIs the terminal keeper kept running through the restart go back into their terminals, and busy ones carry on.
+    // (The CEO's session is resumed instead: its office tools live in this process.)
+    const back = await this.backend
+      .reconnectClis((id) => {
+        const a = this.state.agents.find((x) => x.id === id);
+        return a && a.role !== 'ceo' ? this.terminalFor(a) : null;
+      })
+      .catch((err) => {
+        console.warn('could not reconnect to the terminal keeper', err);
+        return [];
+      });
+    const carryOn: PersistedAgent[] = [];
+    for (const a of this.state.agents) {
+      if (!BUSY.includes(a.status)) continue;
+      if (back.some((c) => c.agentId === a.id && c.busy)) {
+        carryOn.push(a);
+        continue;
+      }
+      a.status = 'stopped';
+      a.lastError = 'The swarm server restarted while this agent was working.';
+      interrupted.push(a);
+    }
+    for (const c of back) if (c.busy && !carryOn.some((a) => a.id === c.agentId)) this.agentRt.get(c.agentId)?.terminal?.releaseIdle?.();
     for (const r of this.state.repos) this.repoRt.set(r.id, { issues: [], pulls: [], lastSync: null, syncing: false, cloneStatus: 'pending', lastMergedAt: null, folderSync: null, merging: false });
+    for (const a of carryOn) this.reattachSession(a);
+    this.backend.hooksReady();
 
     try {
       this.user = await this.backend.user();
@@ -524,11 +544,13 @@ export class Swarm {
 
     for (const r of this.state.repos) void this.cloneRepo(r.id);
     await Promise.all(this.state.repos.map((r) => this.syncRepo(r.id)));
-    // Nothing is running yet, so anything still alive in a desk (or a preview) is left over from before the restart.
+    // Anything still alive in a desk (or a preview) is left over from before the restart, except around the CLIs that
+    // kept running through it: their dev servers and commands are theirs.
     await Promise.all([
       ...this.state.agents.map((a) => {
         const repo = this.state.repos.find((r) => r.id === a.repoId);
-        return repo ? this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined) : undefined;
+        if (!repo || back.some((c) => c.agentId === a.id)) return undefined;
+        return this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
       }),
       this.previews.clearOrphans(this.state.repos),
     ]);
@@ -1096,9 +1118,13 @@ export class Swarm {
     return this.previews.stop(this.repo(id));
   }
 
-  /** Server shutdown: stop every floor's app so nothing is left holding a preview port. */
-  async shutdown(): Promise<void> {
+  /**
+   * Server shutdown: stop every floor's app so nothing is left holding a preview port. Agents' CLIs keep working
+   * through a restart (the terminal keeper holds them for the next start) and stop when the office quits.
+   */
+  async shutdown(restart = false): Promise<void> {
     await this.writeState().catch((err) => console.warn('could not save the state', err));
+    this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
     await this.saveTerminals(true);
     await this.previews.stopAll(this.state.repos);
   }
@@ -1364,6 +1390,22 @@ export class Swarm {
     this.save();
   }
 
+  /** An agent whose CLI kept working through the office's restart: the office follows its session again. */
+  private reattachSession(a: PersistedAgent) {
+    const repo = this.state.repos.find((r) => r.id === a.repoId);
+    if (!repo) return;
+    this.appendLog(a, [{ kind: 'system', text: '↻ The office restarted; their CLI kept working and the office is following it again.' }]);
+    this.startAgentSession(a, repo, this.backend.deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
+  }
+
+  /** The manager pressed Esc in the agent's terminal and the CLI stopped its turn: a Stop that leaves the CLI to them. */
+  private interrupted(a: PersistedAgent) {
+    if (!BUSY.includes(a.status)) return;
+    a.status = 'stopped';
+    a.lastError = 'Interrupted in the terminal';
+    this.appendLog(a, [{ kind: 'manager', text: '■ Interrupted in the terminal. Type there to carry on.' }]);
+  }
+
   resetAgent(id: string) {
     const a = this.agent(id);
     if (BUSY.includes(a.status)) throw new HttpError(409, `${a.name} is busy; stop them first`);
@@ -1583,7 +1625,8 @@ export class Swarm {
     systemAppend: string,
     resumeSessionId?: string,
     outputSchema?: Record<string, unknown>,
-    typed = false,
+    /** typed: the manager typed the prompt at the CLI; reattach: follow the CLI that kept working through a restart. */
+    mode: 'typed' | 'reattach' | null = null,
   ) {
     const rt = this.agentRt.get(a.id)!;
     a.status = 'working';
@@ -1602,7 +1645,9 @@ export class Swarm {
         outputSchema,
         // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.
         keepAlive: a.task !== 'qa',
-        typed,
+        typed: mode === 'typed',
+        reattach: mode === 'reattach',
+        agentId: a.id,
         ...how,
       },
       {
@@ -1649,6 +1694,7 @@ export class Swarm {
     a.turns += result.turns;
     // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
     void this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    if (result.interrupted) this.interrupted(a);
 
     if (a.task === 'qa') await this.onQaFinished(a, repo, result);
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
@@ -2078,7 +2124,7 @@ export class Swarm {
     a.startedAt = Date.now();
     if (a.task === null) a.task = 'issue';
     const fixing = a.task === 'fix' && a.prNumber ? { pr: a.prNumber, headRef: a.branch } : undefined;
-    this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed);
+    this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed ? 'typed' : null);
   }
 
   updateSettings(patch: Partial<SwarmSettings>) {
@@ -2653,6 +2699,7 @@ export class Swarm {
     a.turns += result.turns;
     const job = this.state.ceo.job;
     this.state.ceo.job = null;
+    if (result.interrupted) this.interrupted(a);
     if (a.status === 'stopped') {
       // the manager already logged the stop
     } else if (!result.ok) {

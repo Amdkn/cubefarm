@@ -1,10 +1,11 @@
 import * as github from './github.ts';
 import * as workspace from './workspace.ts';
 import { startSession, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
-import { startCliSession, terminalsAvailable } from './cliRunner.ts';
+import { hooksReady, reconnectClis, releaseClis, startCliSession, terminalsAvailable, type ReconnectedCli } from './cliRunner.ts';
 import { detectClis } from './clis.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
+import type { AgentTerminal } from './terminal.ts';
 import type { CliView, GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
 
 /** Everything the swarm needs from the outside world. The demo backend fakes all of it. */
@@ -46,6 +47,12 @@ export interface Backend {
   startSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle;
   /** Terminals can run here (the native pseudo-terminal module loaded). */
   terminals: boolean;
+  /** The office started: the CLIs its terminal keeper kept running through a restart, back in their agents' terminals. */
+  reconnectClis(terminalFor: (agentId: string) => AgentTerminal | null): Promise<ReconnectedCli[]>;
+  /** The office follows those CLIs' sessions again: hooks that waited for it can come in. */
+  hooksReady(): void;
+  /** The office is stopping: its CLIs carry on in the keeper through a restart (true), or stop with it. */
+  releaseClis(restart: boolean): void;
   /** The coding-agent CLIs installed on this machine. */
   detectClis(): Promise<CliView[]>;
   /** Run a floor's app for the preview monitor (its own worktree, its own port). */
@@ -86,6 +93,9 @@ export const realBackend: Backend = {
   releaseDesk: workspace.releaseDesk,
   startSession: (opts, cb) => (opts.terminal ? startCliSession(opts, cb) : startSession(opts, cb)),
   terminals: terminalsAvailable,
+  reconnectClis: (terminalFor) => (terminalsAvailable ? reconnectClis(terminalFor) : Promise.resolve([])),
+  hooksReady,
+  releaseClis,
   detectClis,
   previews: realPreviews,
   office: realOffice,

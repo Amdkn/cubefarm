@@ -194,7 +194,8 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`     workspaces: ${WORKSPACE_ROOT}\n`);
 });
 
-// Floors' apps don't outlive the office. (A hard kill skips this; the next start clears the orphans.)
+// Floors' apps don't outlive the office. (A hard kill skips this; the next start clears the orphans.) Agents' CLIs
+// carry on through a restart and stop when the office quits.
 let closing = false;
 const shutdown = (signal: string) => {
   if (closing) return;
@@ -202,7 +203,7 @@ const shutdown = (signal: string) => {
   console.log(`\n  ${signal}: stopping floor previews…`);
   const force = setTimeout(() => process.exit(0), 15_000);
   void swarm
-    .shutdown()
+    .shutdown(signal === 'restart')
     .catch((err) => console.error(err))
     .finally(() => {
       clearTimeout(force);
@@ -211,9 +212,10 @@ const shutdown = (signal: string) => {
 };
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
-// The launcher has the update ready and asks the office to stop so it can restart it on the new code.
+// The launcher asks the office to stop: to restart it (an update, a code change) unless it says it's quitting.
 if (underLauncher()) {
   process.on('message', (msg) => {
-    if ((msg as { type?: unknown } | null)?.type === 'office:shutdown') shutdown('update');
+    const m = msg as { type?: unknown; restart?: unknown } | null;
+    if (m?.type === 'office:shutdown') shutdown(m.restart === false ? 'stop' : 'restart');
   });
 }

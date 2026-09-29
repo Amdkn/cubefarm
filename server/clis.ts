@@ -145,6 +145,8 @@ export interface LaunchContext {
   files: { settings: string; mcp: string | null; system: string };
   /** Where the CLI's turn-complete signal goes (Codex notify, the OpenCode plugin). */
   notify: { script: string; url: string };
+  /** Codex's hook program: forwards each hook to the office (notify.url). */
+  codexHook: string;
   plugin: string; // file URL of the OpenCode plugin
   /** The Playwright MCP server, when the floor tests in a browser. Claude Code gets it through its MCP config file. */
   browser: { command: string; args: string[] } | null;
@@ -156,6 +158,19 @@ export interface Launch {
 }
 
 const EFFORT_CODEX: Record<EffortLevel, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
+
+/** Codex hooks the office listens to: its steps, and Esc interrupting a turn. Turn endings come from notify. */
+export const CODEX_HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Interrupt'];
+
+/**
+ * The command Codex runs for each hook. It never changes (the office's address travels in CUBEFARM_HOOK_URL), so the
+ * manager trusts the hooks once in Codex's /hooks and that holds for every session. On Windows, Codex runs it through
+ * PowerShell or cmd depending on its version, and a command starting with a quote fails in both: plain `node` (on the
+ * PATH the office gave it) and the script in double quotes work in either. Elsewhere it goes through the shell.
+ */
+export function codexHookCommand(node: string, script: string, win = WIN): string {
+  return win ? `node "${script}"` : [node, script].map((s) => `'${s.replaceAll("'", `'"'"'`)}'`).join(' ');
+}
 
 export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
   switch (id) {
@@ -195,11 +210,12 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         ...(ctx.model ? ['-m', ctx.model] : []),
         ...(ctx.effort ? ['-c', `model_reasoning_effort=${toml(EFFORT_CODEX[ctx.effort])}`] : []),
         ...(ctx.browser ? ['-c', `mcp_servers.playwright={command=${toml(ctx.browser.command)},args=[${ctx.browser.args.map(toml).join(',')}]}`] : []),
+        ...CODEX_HOOK_EVENTS.flatMap((e) => ['-c', `hooks.${e}=[{hooks=[{type="command",command=${toml(codexHookCommand(process.execPath, ctx.codexHook))},timeout=10}]}]`]),
         // Like the manager's own Codex, but it can't stop to ask: no approvals and no sandbox (its sandbox can't reach
         // the credential store, so git and gh fail in it).
         '--dangerously-bypass-approvals-and-sandbox',
       ];
-      return { args: ctx.resumeId ? ['resume', ...args, ctx.resumeId, ctx.prompt] : [...args, '--', ctx.prompt], env: {} };
+      return { args: ctx.resumeId ? ['resume', ...args, ctx.resumeId, ctx.prompt] : [...args, '--', ctx.prompt], env: { CUBEFARM_HOOK_URL: ctx.notify.url } };
     }
     case 'opencode': {
       const config = {
@@ -237,6 +253,25 @@ export function trustKey(screen: string): 'enter' | 'down' | null {
   if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
   if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
   return null;
+}
+
+/**
+ * Codex asks to review new hooks before it starts. They only show the office Codex's steps, so trusting them is the
+ * manager's call (once, in /hooks): the office moves to "Continue without trusting" (Down) and takes it (Enter).
+ */
+export function hookReviewKey(screen: string): 'enter' | 'down' | null {
+  if (!/Hooks need review/i.test(screen)) return null;
+  const selected = screen.match(/^\s*[❯›]\s*(?:\d+\.\s*)?(.+)$/m)?.[1] ?? '';
+  return /^continue without trusting/i.test(selected.trim()) ? 'enter' : 'down';
+}
+
+/**
+ * Lines on screen where a CLI says it interrupted a turn (Claude Code: "Interrupted · What should Claude do
+ * instead?", Codex: "Conversation interrupted"). Esc fires no hook in Claude Code, so a new one is how the office
+ * knows the manager stopped the turn from the terminal.
+ */
+export function interruptions(screen: string): number {
+  return screen.split('\n').filter((l) => /\binterrupted\b/i.test(l)).length;
 }
 
 // ---------- helper scripts the CLIs run ----------
@@ -279,6 +314,19 @@ if (event.type === 'agent-turn-complete') {
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});
 }
+`;
+
+/** Codex's hook program: passes what Codex tells a hook on to the office and answers nothing, so Codex carries on as usual. */
+export const CODEX_HOOK_SOURCE = String.raw`// cubefarm: Codex's hooks. Tells the office what Codex is doing; never changes what it does.
+const url = process.env.CUBEFARM_HOOK_URL;
+const chunks = [];
+process.stdin.on('data', (c) => chunks.push(c));
+process.stdin.on('end', async () => {
+  try {
+    if (url) await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: Buffer.concat(chunks), signal: AbortSignal.timeout(5000) });
+  } catch {}
+  process.stdout.write('{}');
+});
 `;
 
 /** OpenCode plugin: reports its session and when it goes idle (a turn is complete). No imports: loaded from a file. */

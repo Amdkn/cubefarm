@@ -2,8 +2,8 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { launchArgs, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
-import { newScreenshots, screenshotFile } from './agentRunner.ts';
+import { CODEX_HOOK_EVENTS, codexHookCommand, hookReviewKey, interruptions, launchArgs, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { describeTool, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
 
@@ -55,6 +55,25 @@ describe('trustKey', () => {
   });
 });
 
+describe('hookReviewKey', () => {
+  const review = (selected: 1 | 3) =>
+    ['  Hooks need review', '  5 hooks are new or changed.', `${selected === 1 ? '›' : ' '} 1. Review hooks`, '  2. Trust all and continue', `${selected === 3 ? '›' : ' '} 3. Continue without trusting (hooks won't run)`].join('\n');
+
+  it("goes on without the office's hooks, leaving trust to the manager", () => {
+    expect(hookReviewKey(review(1))).toBe('down');
+    expect(hookReviewKey(review(3))).toBe('enter');
+    expect(hookReviewKey('› Ask Codex to do anything')).toBeNull();
+  });
+});
+
+describe('interruptions', () => {
+  it('counts the lines where a CLI says it interrupted a turn', () => {
+    expect(interruptions(['● Bash(sleep 4)', '  ⎿  Interrupted · What should Claude do instead?', '❯ '].join('\n'))).toBe(1);
+    expect(interruptions('■ Conversation interrupted - tell the model what to do differently.\n› ')).toBe(1);
+    expect(interruptions('● done\n❯ ')).toBe(0);
+  });
+});
+
 describe('launchArgs', () => {
   const ctx = (patch: Partial<LaunchContext> = {}): LaunchContext => ({
     cwd: path.join(dir, 'desk'),
@@ -68,6 +87,7 @@ describe('launchArgs', () => {
     additionalDirectories: [],
     files: { settings: 'settings.json', mcp: null, system: 'instructions.md' },
     notify: { script: 'notify.cjs', url: 'http://127.0.0.1:1/api/hooks/t' },
+    codexHook: 'codex-hook.cjs',
     plugin: 'file:///plugin.mjs',
     browser: null,
     ...patch,
@@ -100,6 +120,19 @@ describe('launchArgs', () => {
     expect(resumed).toContain('--dangerously-bypass-approvals-and-sandbox');
   });
 
+  it("gives Codex the office's hooks, with the office's address in its environment", () => {
+    const { args, env } = launchArgs('codex', ctx());
+    const hooks = args.filter((a) => a.startsWith('hooks.'));
+    expect(hooks.map((h) => h.slice(6, h.indexOf('=')))).toEqual(CODEX_HOOK_EVENTS);
+    expect(hooks[0]).toContain('type="command"');
+    expect(env.CUBEFARM_HOOK_URL).toBe('http://127.0.0.1:1/api/hooks/t');
+  });
+
+  it('runs the hook program with a command that never starts with a quote on Windows', () => {
+    expect(codexHookCommand('C:\\Program Files\\nodejs\\node.exe', 'C:\\Users\\A B\\.cubefarm\\bin\\codex-hook.cjs', true)).toBe('node "C:\\Users\\A B\\.cubefarm\\bin\\codex-hook.cjs"');
+    expect(codexHookCommand('/usr/bin/node', "/home/o'neil/.cubefarm/bin/codex-hook.cjs", false)).toBe(`'/usr/bin/node' '/home/o'"'"'neil/.cubefarm/bin/codex-hook.cjs'`);
+  });
+
   it("lets OpenCode run without stopping to ask, and without updating itself", () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
     for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
@@ -117,6 +150,15 @@ describe('screenshotFile', () => {
     expect(shot?.data.toString()).toBe('png-bytes');
     expect(screenshotFile(cwd, '### Result\n- no link here')).toBeNull();
     fs.rmSync(cwd, { recursive: true, force: true });
+  });
+});
+
+describe("Codex's file edits in the log", () => {
+  it('names the files an apply_patch touches, and says when it worked', () => {
+    const patch = '*** Begin Patch\n*** Add File: notes.txt\n+hi\n*** Update File: src/app.ts\n@@\n-a\n+b\n*** End Patch';
+    expect(describeTool(dir, 'apply_patch', { command: patch })).toBe('Edit add notes.txt, src/app.ts');
+    expect(summariseResult(dir, 'apply_patch', 'Exit code: 0\nOutput:\nSuccess. Updated the following files:\nA notes.txt')).toEqual([{ kind: 'result', text: '  ⎿ Updated' }]);
+    expect(summariseResult(dir, 'apply_patch', 'error: patch did not apply')[0].text).toContain('patch did not apply');
   });
 });
 

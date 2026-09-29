@@ -62,8 +62,13 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   terminal lines.
 - `cliRunner.ts`: the terminal runtime (the default): one agent as the real CLI in a node-pty, same session contract
   as `agentRunner.ts`. Claude Code reports through HTTP hooks (`POST /api/hooks/:token`; PreToolUse approves every
-  call); Codex/OpenCode only report turn endings, and their screenshots are collected from the session's Playwright
-  output folder. The CEO's office tools are served over MCP (`/api/mcp/:token`).
+  call); Codex reports turn endings (notify) and, once the manager trusts them, its steps (`-c hooks.*`); OpenCode
+  only turn endings. Codex/OpenCode screenshots are collected from the session's Playwright output folder. Esc in a
+  terminal ends the session as `interrupted`. The CEO's office tools are served over MCP (`/api/mcp/:token`).
+- `ptyHost.ts`: the terminal keeper, a detached process of its own (`launch` re-spawns it outside the office's process
+  tree) holding the CLIs' pseudo-terminals and relaying their hooks, so agents keep working through office restarts.
+  `ptyClient.ts` is the office's side (start/connect, spawn, adopt after a restart, local fallback); `ptyProtocol.ts`
+  their JSON-lines messages. The launcher's `office:shutdown` says `restart: false` when quitting: CLIs stop then.
   A developer's CLI stays at its prompt after the task (`keepAlive`): follow-ups and prompts typed there reuse it.
 - `clis.ts`: the CLIs (Claude Code from the SDK's bundled binary, Codex, OpenCode): detection, Windows `.cmd` shim
   unwrapping, each one's command line, and the helper scripts they call back with.

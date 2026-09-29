@@ -142,8 +142,9 @@ function onExit(child, how) {
 }
 
 /**
- * Stop a child. 'update' asks the server over IPC (the contract with the server), 'stop' also sends SIGTERM where
- * signals exist, 'kill' kills its tree right away. Whatever is still running after 20 s is killed.
+ * Stop a child. 'update' and 'restart' ask the server over IPC (the contract with the server) and say it's coming
+ * back, so agents' CLIs carry on in its terminal keeper; 'stop' says it's quitting and also sends SIGTERM where
+ * signals exist; 'kill' kills its tree right away. Whatever is still running after 20 s is killed.
  */
 function stopChild(child, how) {
   if (!child) return Promise.resolve();
@@ -153,7 +154,7 @@ function stopChild(child, how) {
     if (how === 'kill') killTree(proc);
     else {
       const asked = proc.connected;
-      if (asked) proc.send({ type: 'office:shutdown' }, () => undefined);
+      if (asked) proc.send({ type: 'office:shutdown', restart: how !== 'stop' }, () => undefined);
       if (!WIN && (how === 'stop' || !asked)) proc.kill('SIGTERM');
       else if (!asked) killTree(proc);
     }
@@ -355,7 +356,7 @@ function watch() {
 
 async function restartServer(file) {
   log(green(`Restarting: ${path.relative(root, file)} changed`));
-  await stopChild(children.server, 'stop');
+  await stopChild(children.server, 'restart');
   if (!children.server && !updating && !shuttingDown) startServer();
 }
 

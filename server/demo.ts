@@ -506,6 +506,9 @@ export function createDemoBackend(): Backend {
       return inTerminal(opts, cb, (c) => (opts.role === 'ceo' ? ceoSession(opts, c) : fakeSession(opts, c, deskRepo.get(opts.cwd) ?? [...repos.keys()][0])));
     },
     terminals: true,
+    reconnectClis: async () => [], // fake sessions end with the office
+    hooksReady: () => undefined,
+    releaseClis: () => undefined,
     detectClis: async () =>
       CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated })),
     previews: demoPreviews,
