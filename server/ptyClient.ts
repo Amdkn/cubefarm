@@ -41,6 +41,7 @@ export interface PtyOptions {
 let conn: net.Socket | null = null;
 let leaving = false; // the office is closing its connection on purpose (a restart): the terminals carry on
 let hookPort = 0;
+let hostPid = 0;
 let found: HeldPty[] = [];
 const remote = new Map<string, RemotePty>();
 let hookHandler: (token: string, body: unknown) => unknown = () => ({});
@@ -197,10 +198,15 @@ export async function startKeeper(home: string, onHook: (token: string, body: un
     return [];
   }
   conn = hello.sock;
+  leaving = false;
   hookPort = hello.ready.hookPort;
+  hostPid = hello.ready.pid ?? 0;
   found = hello.ready.ptys;
   return found;
 }
+
+/** The keeper's process (0 when there's none, or it didn't say): desk clean-ups must never stop it. */
+export const keeperPid = () => (conn ? hostPid : 0);
 
 // ---------- terminals ----------
 

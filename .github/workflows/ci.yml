@@ -19,8 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows too: the office itself runs on Windows (paths, child processes, git worktrees).
-        os: [ubuntu-latest, windows-latest]
+        # Windows and macOS too: people run the office on both (paths, child processes, terminals, git worktrees).
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:

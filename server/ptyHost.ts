@@ -182,7 +182,7 @@ function connected(sock: net.Socket) {
       office = sock;
       hooksOpen = false;
       const ptys: HeldPty[] = [...held].map(([id, h]) => ({ id, pid: h.proc.pid, meta: h.meta, exit: h.exit }));
-      send({ op: 'ready', version: PTY_PROTOCOL, hookPort: (hooks.address() as net.AddressInfo).port, ptys });
+      send({ op: 'ready', version: PTY_PROTOCOL, hookPort: (hooks.address() as net.AddressInfo).port, ptys, pid: process.pid });
       return;
     }
     const h = 'id' in m ? held.get(m.id) : undefined;

@@ -131,7 +131,6 @@ export async function detectClis(): Promise<CliView[]> {
 // ---------- starting one on a task ----------
 
 export interface LaunchContext {
-  cwd: string;
   prompt: string;
   systemAppend: string;
   model: string; // '' = the CLI's own default
@@ -225,8 +224,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }, // it can't stop to ask either
         ...(ctx.browser ? { mcp: { playwright: { type: 'local', command: [ctx.browser.command, ...ctx.browser.args], enabled: true } } } : {}),
       };
+      // No project argument: it starts in its terminal's folder, and a desk path in its command line would make the
+      // desk clean-up take it for a leftover.
       const args = [
-        ctx.cwd,
         '--auto',
         ...(ctx.model ? ['--model', ctx.model] : []),
         ...(ctx.resumeId ? ['--session', ctx.resumeId] : []),

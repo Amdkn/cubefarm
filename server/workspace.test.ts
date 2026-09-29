@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git } = await import('./exec.ts');
-const { mainDir, syncMain: sync } = await import('./workspace.ts');
+const { leftoversInDesk, mainDir, syncMain: sync } = await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
 
@@ -217,5 +217,33 @@ describe('syncMain', { timeout: 60_000 }, () => {
     expect(await syncMain(r.fullName, 'main', { touch: true })).toMatch(/^updated to \w+$/);
     expect(await head(r.dir)).toBe(await head(r.upstream));
     expect(await fs.readFile(path.join(r.dir, 'lines.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
+  });
+});
+
+describe('leftoversInDesk', () => {
+  const desk = '/Users/ada/.cubefarm/workspaces/me__app/desks/ada-01df';
+  const keep = { pids: [300], markers: ['/Users/ada/.cubefarm/sessions', '/Users/ada/.cubefarm/bin'] };
+
+  it("finds what an agent left running in its desk, but never an agent's own CLI or the office's processes", () => {
+    const listing = [
+      `  101 node ${desk}/node_modules/.bin/vite --port 5401`, // a dev server it left: a leftover
+      `  102 /bin/zsh -c cd ${desk} && npm test`, // a command still running there
+      `  103 node /opt/homebrew/bin/codex -c notify=["node","/Users/ada/.cubefarm/bin/notify.cjs"] -c developer_instructions="Your worktree: ${desk}"`,
+      `  104 /opt/homebrew/lib/codex/codex -c notify=["node","/Users/ada/.cubefarm/bin/notify.cjs"] -c developer_instructions="Your worktree: ${desk}"`,
+      `  300 node /Users/ada/project/${desk}`, // spared by pid
+      '  105 node /somewhere/else/server.js',
+    ].join('\n');
+    expect(leftoversInDesk(listing, desk, keep)).toEqual([101, 102]);
+  });
+
+  it('recognises Windows paths as Codex escapes them in its command line', () => {
+    const winDesk = String.raw`C:\Users\Ada\.cubefarm\workspaces\me__app\desks\ada-01df`;
+    const winKeep = { pids: [], markers: [String.raw`C:\Users\Ada\.cubefarm\bin`] };
+    const escaped = (s: string) => s.replaceAll('\\', '\\\\'); // how -c values carry a path (JSON strings)
+    const listing = [
+      `  7 codex.exe -c notify=["node","${escaped(String.raw`C:\Users\Ada\.cubefarm\bin\notify.cjs`)}"] -c developer_instructions="Your worktree: ${escaped(winDesk)}"`,
+      `  8 node ${winDesk}\\server.js`,
+    ].join('\n');
+    expect(leftoversInDesk(listing, winDesk, winKeep)).toEqual([8]);
   });
 });

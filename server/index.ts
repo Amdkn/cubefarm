@@ -212,6 +212,7 @@ const shutdown = (signal: string) => {
 };
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGHUP', () => shutdown('SIGHUP')); // its terminal window closed (macOS, Linux; Windows' console too)
 // The launcher asks the office to stop: to restart it (an update, a code change) unless it says it's quitting.
 if (underLauncher()) {
   process.on('message', (msg) => {

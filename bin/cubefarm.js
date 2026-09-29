@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -132,7 +133,20 @@ function checks() {
     const ok = status?.loggedIn === true;
     out.push({ name: 'Claude', ok, detail: ok ? `signed in${status.subscriptionType ? ` (${status.subscriptionType})` : ''}` : 'not signed in', fix: 'run: npx cubefarm login' });
   }
+
+  // Agents test in a browser through Playwright, which drives Google Chrome by default.
+  const chrome = chromePaths().some((p) => fs.existsSync(p));
+  out.push({ name: 'Chrome', ok: chrome, detail: chrome ? 'for browser testing' : 'not found', fix: 'install Google Chrome so agents can test in a browser' });
   return out;
+}
+
+function chromePaths() {
+  const env = process.env;
+  if (process.platform === 'win32') {
+    return [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA].filter(Boolean).map((d) => path.join(d, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+  }
+  if (process.platform === 'darwin') return ['/Applications/Google Chrome.app', path.join(os.homedir(), 'Applications', 'Google Chrome.app')];
+  return ['/opt/google/chrome/chrome', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'];
 }
 
 const printCheck = (c) => console.log(`  ${c.ok ? green('✓') : red('✗')} ${c.name.padEnd(12)} ${c.detail ? dim(c.detail) : ''}${c.ok ? '' : `  → ${c.fix}`}`);

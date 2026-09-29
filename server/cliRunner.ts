@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
 import { cliLabel, CODEX_HOOK_SOURCE, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
-import { adoptPty, discardPty, hooksReady, keeperHookUrl, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
+import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
   clip,
   describeTool,
@@ -274,6 +274,15 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
 }
 
 export { hooksReady };
+
+/**
+ * What a desk clean-up (releaseDesk) must leave alone: the keeper, every CLI in a terminal, and the office's session
+ * files, which only the CLIs' own command lines carry (Codex's instructions name the worktree, for one).
+ */
+export function officeProcesses(): { pids: number[]; markers: string[] } {
+  const pids = [keeperPid(), ...[...lives.values()].map((l) => l.proc?.pid ?? 0)].filter((p) => p > 0);
+  return { pids, markers: [SESSIONS_DIR, BIN_DIR] };
+}
 
 /**
  * The office is stopping. On a restart its CLIs carry on in the terminal keeper, which holds their output and hooks
@@ -619,7 +628,6 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   launched.push(prompt.trim());
 
   const launch = launchArgs(cli, {
-    cwd: opts.cwd,
     prompt,
     systemAppend: opts.systemAppend,
     model: opts.model,

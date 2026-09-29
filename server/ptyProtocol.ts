@@ -31,7 +31,7 @@ export type ToHost =
   | { op: 'shutdown' }; // stop every terminal and exit (a keeper on another version)
 
 export type FromHost =
-  | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[] }
+  | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[]; pid?: number }
   | { op: 'spawned'; id: string; pid: number }
   | { op: 'failed'; id: string; error: string }
   | { op: 'data'; id: string; data: string }

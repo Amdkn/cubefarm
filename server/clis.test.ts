@@ -76,7 +76,6 @@ describe('interruptions', () => {
 
 describe('launchArgs', () => {
   const ctx = (patch: Partial<LaunchContext> = {}): LaunchContext => ({
-    cwd: path.join(dir, 'desk'),
     prompt: '--looks like a flag',
     systemAppend: 'You are Ada.',
     model: '',
