@@ -71,6 +71,7 @@ export function drawTerminal(
   shot: HTMLImageElement | null,
   showBrowser: boolean,
   now: number,
+  program: string, // the coding agent's command, e.g. claude or codex
 ) {
   ctx.fillStyle = TERM.bg;
   ctx.fillRect(0, 0, w, h);
@@ -101,7 +102,7 @@ export function drawTerminal(
               ? `issue #${agent.issueNumber}`
               : 'idle';
   const host = agent.role === 'qa' ? 'qa-lab' : agent.role === 'ceo' ? 'hq' : 'swarm';
-  const title = `${agent.name.toLowerCase()}@${host} — ${job} — claude`;
+  const title = `${agent.name.toLowerCase()}@${host} — ${job} — ${program}`;
   ctx.fillText(title, 84, barH / 2 + 1);
 
   const termW = showBrowser ? Math.round(w * 0.56) : w;

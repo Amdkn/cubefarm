@@ -5,9 +5,11 @@ import { CEO_ID, type HireRequestView, type PhoneMessage } from '../../../shared
 import { Markdown } from './Markdown';
 import { MessageBox } from './MessageBox';
 import { closeOverlay } from './Overlays';
+import { Games, type GameId } from './games/Games';
+import { effectiveModel } from '../../../shared/models';
 
-// The manager's phone: text the CEO, decide on hires, and see the whole company at a glance
-// without walking anywhere. Press P anywhere in the office.
+// The manager's phone: text the CEO, decide on hires, see the whole company at a glance
+// without walking anywhere, and play a game while the team works. Press P anywhere in the office.
 
 async function attempt<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try {
@@ -74,7 +76,7 @@ export function Resume({ req, highlight }: { req: HireRequestView; highlight?: b
       {open && <Markdown className="resume-brief" text={req.brief} />}
       {hire && pending && (
         <div className="muted small">
-          {req.model || settings.defaultModel} · {req.effort || settings.defaultEffort} effort
+          {effectiveModel(req.model, settings.runtime === 'terminal' ? settings.defaultCli : 'claude', settings, 'claude-opus-5-5') || 'default model'} · {req.effort || settings.defaultEffort} effort
         </div>
       )}
       {!pending && req.note && <div className="muted small">Your note: “{req.note}”</div>}
@@ -383,8 +385,29 @@ function Company() {
 
 // ---------- the phone ----------
 
+// Put the phone away mid-game and it opens on that (paused) game next time, unless something new came in meanwhile.
+let resumeGames: { game: GameId | null; waiting: number } | null = null;
+
+const waitingNow = () => {
+  const s = useStore.getState();
+  return pendingRequests(s.requests).length + unreadMessages(s.messages, s.phoneReadAt);
+};
+
 export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestId?: string }) {
-  const [tab, setTab] = useState<PhoneTab>(initialTab ?? (requestId ? 'hires' : 'chat'));
+  const [tab, setTab] = useState<PhoneTab>(() =>
+    resumeGames && !requestId && waitingNow() <= resumeGames.waiting ? 'games' : (initialTab ?? (requestId ? 'hires' : 'chat')),
+  );
+  const [game, setGame] = useState<GameId | null>(() => (tab === 'games' ? (resumeGames?.game ?? null) : null));
+  const where = useRef({ tab, game });
+  useEffect(() => {
+    where.current = { tab, game };
+  });
+  useEffect(
+    () => () => {
+      resumeGames = where.current.tab === 'games' ? { game: where.current.game, waiting: waitingNow() } : null;
+    },
+    [],
+  );
   const openOverlay = useStore((s) => s.openOverlay);
   const requests = useStore((s) => s.requests);
   const messages = useStore((s) => s.messages);
@@ -395,7 +418,8 @@ export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestI
     const t = setInterval(() => setNow(Date.now()), 20_000);
     return () => clearInterval(t);
   }, []);
-  // Keep the overlay's tab in sync so new messages know whether the chat is on screen.
+  // Keep the overlay's tab in sync so new messages know whether the chat is on screen (during a game it isn't,
+  // so the CEO's texts still pop up).
   useEffect(() => {
     openOverlay({ kind: 'phone', tab, requestId });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -419,6 +443,7 @@ export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestI
     ['chat', '💬', ceoName, tab === 'chat' ? 0 : unread],
     ['hires', '📄', 'Hires', pending],
     ['company', '📊', 'Company', 0],
+    ['games', '🎮', 'Games', 0],
   ];
   return (
     <div className="overlay phone-overlay" onMouseDown={(e) => e.target === e.currentTarget && closeOverlay()}>
@@ -432,10 +457,12 @@ export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestI
           {tab === 'chat' && <Chat />}
           {tab === 'hires' && <Hires focusId={requestId} />}
           {tab === 'company' && <Company />}
+          {tab === 'games' && <Games game={game} onGame={setGame} />}
         </div>
         <nav className="phone-tabs">
           {tabs.map(([k, icon, label, badge]) => (
-            <button key={k} className={`phone-tab ${tab === k ? 'phone-tab-on' : ''}`} onClick={() => setTab(k)}>
+            // Tapping Games again while in a game goes back to the list.
+            <button key={k} className={`phone-tab ${tab === k ? 'phone-tab-on' : ''}`} onClick={() => (k === 'games' && tab === 'games' ? setGame(null) : setTab(k))}>
               <span className="phone-tab-icon">
                 {icon}
                 {badge > 0 && <span className="badge badge-dot">{badge}</span>}
@@ -448,6 +475,11 @@ export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestI
           {tab === 'chat' && (
             <>
               <kbd>Shift</kbd>+<kbd>Enter</kbd> new line ·{' '}
+            </>
+          )}
+          {tab === 'games' && game && (
+            <>
+              <kbd>Backspace</kbd> games ·{' '}
             </>
           )}
           <kbd>P</kbd> or <kbd>Esc</kbd> to put it away

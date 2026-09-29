@@ -30,7 +30,7 @@ export function StartScreen() {
       <div className="start-card">
         <div className="start-logo">✻</div>
         <h1>{settings.companyName || 'cubefarm'}</h1>
-        <p className="start-tag">{settings.managerName ? `Welcome back, ${settings.managerName}.` : 'A cartoon office where a team of Claude Code agents works through your GitHub issues.'}</p>
+        <p className="start-tag">{settings.managerName ? `Welcome back, ${settings.managerName}.` : 'A cartoon office where a team of AI coding agents works through your GitHub issues.'}</p>
         <ul className="start-list">
           <li>
             🏢 {repos.length} project{repos.length === 1 ? '' : 's'}, {staff} {staff === 1 ? 'person' : 'people'} on staff{ceo ? `, and ${ceo.name} in the corner office` : ''}.

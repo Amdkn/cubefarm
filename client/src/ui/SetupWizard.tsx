@@ -97,7 +97,7 @@ export function SetupWizard() {
           <>
             <div className="start-logo">✻</div>
             <h1>cubefarm</h1>
-            <p className="start-tag">Your own cartoon software company, staffed by Claude Code agents.</p>
+            <p className="start-tag">Your own cartoon software company, staffed by AI coding agents.</p>
             <ul className="start-list">
               <li>🏢 Every project gets its own floor, with developers and a QA lab working through its GitHub issues.</li>
               <li>🧠 A CEO studies each project, plans the work and proposes the specialists it needs. You approve every hire.</li>

@@ -1,6 +1,6 @@
 # ✻ cubefarm
 
-A cartoon 3D office where a team of Claude Code agents works through your GitHub issues. You walk the floors, look over their shoulders and watch their pull requests get tested and merged.
+A cartoon 3D office where a team of AI coding agents works through your GitHub issues. You walk the floors, look over their shoulders and watch their pull requests get tested and merged.
 
 ## Get started
 
@@ -15,7 +15,7 @@ That's it. cubefarm checks your machine, starts the office and opens it in your 
 - **Node.js 22 or newer**: [nodejs.org](https://nodejs.org)
 - **git**
 - **The GitHub CLI**, signed in: install it from [cli.github.com](https://cli.github.com), then run `gh auth login`
-- **A Claude subscription**: sign in once with `npx cubefarm login`. Your agents use this login. You don't need to install Claude Code, because cubefarm brings its own.
+- **A coding agent subscription**: cubefarm brings Claude Code, the default agent and the one your CEO runs: sign in once with `npx cubefarm login`. You don't need to install it. Agents can also run Codex or OpenCode, if you have them installed and signed in.
 
 Not sure you're ready? `npx cubefarm doctor` checks all four.
 
@@ -37,7 +37,7 @@ Demo mode fakes GitHub and the agents, so it costs nothing and changes nothing.
 ## What's in the office
 
 - **Floors**: one per project. Ride the elevator between them.
-- **Desks**: walk up behind an agent to watch their monitor. It streams their real terminal, and shows a live browser when they test the UI.
+- **Desks**: walk up behind an agent to watch their monitor. Open it to see their real terminal: every agent is an actual coding agent running on your machine, and you can type into it. It also shows a live browser when they test the UI. Pick the coding agent, model and effort for the whole team or per agent.
 - **The QA lab**: every floor has at least one QA tester.
 - **The whiteboard**: the Kanban board, from backlog to merged.
 - **The lobby**: the manager's office, where you connect projects, hire, file issues and change settings, and the CEO's corner office.
@@ -59,7 +59,7 @@ Demo mode fakes GitHub and the agents, so it costs nothing and changes nothing.
 | Command | What it does |
 | --- | --- |
 | `npx cubefarm` | start the office and open it in your browser |
-| `npx cubefarm login` | sign in to Claude |
+| `npx cubefarm login` | sign in to Claude Code, the built-in coding agent |
 | `npx cubefarm doctor` | check that your machine is ready |
 | `npx cubefarm --demo` | fake GitHub and fake agents |
 | `npx cubefarm --port 4400` | use another port (the default is 4317) |
@@ -79,8 +79,8 @@ Running it from a clone of this repo (`npm start`)? Then the office updates itse
 
 ## Good to know
 
-- **It runs on your Claude subscription.** Every agent draws on the same usage limits. To cap how many work at once, set a session limit in the manager's console.
-- **Agents work on your machine.** By default they can only edit files in their own copy of the repo, can't push to your main branch and can't merge. The office merges, after QA.
+- **It runs on your coding agents' subscriptions.** Agents on the same coding agent draw on the same usage limits. To cap how many work at once, set a session limit in the manager's console.
+- **Agents work on your machine, like your own coding agents**: with your skills, MCP servers and settings, each in its own copy of the repo. They can't push to your main branch or merge: the office merges, after QA.
 - **Your office lives in `~/.cubefarm`**: settings, clones of your repos and one working copy per agent. Set `SWARM_HOME` to use another folder.
 
 ## Learn more

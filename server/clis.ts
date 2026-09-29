@@ -1,0 +1,313 @@
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { run } from './exec.ts';
+import type { AgentCli, CliView, EffortLevel } from '../shared/types.ts';
+
+// The coding-agent CLIs an agent can run in its terminal, how to find them on this machine, and how to start one on
+// a task. Claude Code is fully wired in: its hooks report every tool call to the office.
+// The others start on the same prompt and report only when a turn ends (Codex's notify program, an OpenCode plugin);
+// the office shows their task instead of their tool calls.
+
+export interface CliDef {
+  id: AgentCli;
+  label: string;
+  command: string;
+  integrated: boolean;
+}
+
+export const CLIS: CliDef[] = [
+  { id: 'claude', label: 'Claude Code', command: 'claude', integrated: true },
+  { id: 'codex', label: 'Codex', command: 'codex', integrated: false },
+  { id: 'opencode', label: 'OpenCode', command: 'opencode', integrated: false },
+];
+
+export const isCli = (v: unknown): v is AgentCli => CLIS.some((c) => c.id === v);
+export const cliLabel = (id: AgentCli) => CLIS.find((c) => c.id === id)?.label ?? id;
+
+// ---------- finding a CLI ----------
+
+const WIN = process.platform === 'win32';
+
+/** The executable for a command name on PATH: on Windows only .exe/.cmd/.bat/.com, never an extensionless sh shim. */
+export function resolveCommand(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  const dirs = (env[key] ?? '').split(path.delimiter).filter(Boolean);
+  const exts = WIN ? (env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter((e) => /^\.(exe|cmd|bat|com)$/i.test(e)) : [''];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const file = path.join(dir, name + ext.toLowerCase());
+      try {
+        const st = fs.statSync(file);
+        if (st.isFile() && (WIN || (st.mode & 0o111) !== 0)) return file;
+      } catch {
+        // not here
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * npm installs Windows CLIs as .cmd shims. Running one puts every argument through cmd.exe, which expands %VARS% and
+ * trips over quotes in a prompt, so run what the shim runs instead: the package's .exe, or node on its script.
+ */
+export function unwrapCmdShim(shimPath: string, text: string): { file: string; args: string[] } | null {
+  const line = text.split(/\r?\n/).find((l) => /%\*\s*$/.test(l));
+  if (!line) return null;
+  const dir = path.dirname(shimPath);
+  const targets = [...line.matchAll(/"%dp0%\\([^"]+)"/g)].map((m) => path.join(dir, m[1]));
+  const target = targets[targets.length - 1];
+  if (!target) return null;
+  if (/\.exe$/i.test(target)) return { file: target, args: [] };
+  if (!/\.[cm]?js$/i.test(target)) return null;
+  const between = line.slice(line.indexOf('"%_prog%"') + '"%_prog%"'.length, line.lastIndexOf(`"%dp0%\\`));
+  const nodeFlags = line.includes('"%_prog%"') ? between.trim().split(/\s+/).filter((f) => f.startsWith('--')) : [];
+  const localNode = path.join(dir, 'node.exe');
+  return { file: fs.existsSync(localNode) ? localNode : process.execPath, args: [...nodeFlags, target] };
+}
+
+/**
+ * The Claude Code the Agent SDK ships as a per-platform package (the one `cubefarm login` signs in with), so the
+ * terminal runtime works without Claude Code installed, on the version the office was tested with. Same lookup as
+ * the SDK's own and bin/cubefarm.js.
+ */
+let bundled: string | null | undefined;
+
+function bundledClaude(): string | null {
+  if (bundled !== undefined) return bundled;
+  bundled = null;
+  let sdk: string;
+  try {
+    sdk = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk');
+  } catch {
+    return null;
+  }
+  const { platform, arch } = process;
+  // Only Linux needs the report (glibc or musl). On Windows it walks every native handle, and with pseudo-consoles
+  // closing on other threads that takes the whole office down.
+  const report = platform === 'linux' ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined) : undefined;
+  const musl = platform === 'linux' && !report?.header?.glibcVersionRuntime;
+  const targets = platform === 'linux' ? (musl ? [`linux-${arch}-musl`, `linux-${arch}`] : [`linux-${arch}`, `linux-${arch}-musl`]) : [`${platform}-${arch}`];
+  for (const target of targets) {
+    try {
+      bundled = createRequire(sdk).resolve(`@anthropic-ai/claude-agent-sdk-${target}/claude${WIN ? '.exe' : ''}`);
+      return bundled;
+    } catch {
+      // not installed for this target
+    }
+  }
+  return null;
+}
+
+/** How to start a CLI: the program and the arguments that come before the office's own. */
+export function commandFor(id: AgentCli): { file: string; args: string[] } | null {
+  const bundled = id === 'claude' ? bundledClaude() : null;
+  if (bundled) return { file: bundled, args: [] };
+  const def = CLIS.find((c) => c.id === id);
+  const found = def && resolveCommand(def.command);
+  if (!found) return null;
+  if (WIN && /\.(cmd|bat)$/i.test(found)) {
+    try {
+      return unwrapCmdShim(found, fs.readFileSync(found, 'utf8')) ?? { file: found, args: [] };
+    } catch {
+      return { file: found, args: [] };
+    }
+  }
+  return { file: found, args: [] };
+}
+
+/** Which CLIs this machine has, with their versions. */
+export async function detectClis(): Promise<CliView[]> {
+  return Promise.all(
+    CLIS.map(async (c) => {
+      const cmd = commandFor(c.id);
+      const version = cmd ? await run(cmd.file, [...cmd.args, '--version'], { timeoutMs: 20_000 }).catch(() => null) : null;
+      return { id: c.id, label: c.label, installed: !!cmd, version: version?.split(/\r?\n/)[0].trim().slice(0, 60) || null, integrated: c.integrated };
+    }),
+  );
+}
+
+// ---------- starting one on a task ----------
+
+export interface LaunchContext {
+  cwd: string;
+  prompt: string;
+  systemAppend: string;
+  model: string; // '' = the CLI's own default
+  effort: EffortLevel | '';
+  resumeId?: string;
+  sessionId: string; // the id the office gives a new Claude Code session
+  name: string; // shown in Claude Code's prompt box and the terminal title
+  role: 'dev' | 'qa' | 'ceo';
+  additionalDirectories: string[];
+  /** Files the office wrote for this session (settings, MCP config, instructions). */
+  files: { settings: string; mcp: string | null; system: string };
+  /** Where the CLI's turn-complete signal goes (Codex notify, the OpenCode plugin). */
+  notify: { script: string; url: string };
+  plugin: string; // file URL of the OpenCode plugin
+  /** The Playwright MCP server, when the floor tests in a browser. Claude Code gets it through its MCP config file. */
+  browser: { command: string; args: string[] } | null;
+}
+
+export interface Launch {
+  args: string[];
+  env: Record<string, string>;
+}
+
+const EFFORT_CODEX: Record<EffortLevel, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
+
+export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
+  switch (id) {
+    case 'claude': {
+      const disallowed = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...(ctx.role === 'ceo' ? ['Bash', 'PowerShell', 'NotebookEdit'] : [])];
+      const args = [
+        ...(ctx.resumeId ? ['--resume', ctx.resumeId] : ['--session-id', ctx.sessionId]),
+        ...(ctx.model ? ['--model', ctx.model] : []),
+        ...(ctx.effort ? ['--effort', ctx.effort] : []),
+        // The office's PreToolUse hook answers every permission question (allow, or deny with an office rule).
+        '--permission-mode',
+        'acceptEdits',
+        // On top of the manager's own setup (settings, skills, plugins, MCP servers): the office's hooks and servers.
+        '--settings',
+        ctx.files.settings,
+        ...(ctx.files.mcp ? ['--mcp-config', ctx.files.mcp] : []),
+        '--append-system-prompt-file',
+        ctx.files.system,
+        '--name',
+        ctx.name,
+        ...ctx.additionalDirectories.flatMap((d) => ['--add-dir', d]),
+        '--disallowedTools',
+        ...disallowed,
+        '--',
+        ctx.prompt,
+      ];
+      return { args, env: { DISABLE_AUTOUPDATER: '1' } }; // the office's own copy: agents mustn't each try to update it
+    }
+    case 'codex': {
+      const toml = (s: string) => JSON.stringify(s); // a JSON string is a valid TOML basic string
+      const args = [
+        '--no-alt-screen',
+        '-c',
+        `notify=[${[process.execPath, ctx.notify.script, ctx.notify.url].map(toml).join(',')}]`,
+        '-c',
+        `developer_instructions=${toml(ctx.systemAppend)}`,
+        ...(ctx.model ? ['-m', ctx.model] : []),
+        ...(ctx.effort ? ['-c', `model_reasoning_effort=${toml(EFFORT_CODEX[ctx.effort])}`] : []),
+        ...(ctx.browser ? ['-c', `mcp_servers.playwright={command=${toml(ctx.browser.command)},args=[${ctx.browser.args.map(toml).join(',')}]}`] : []),
+        // Like the manager's own Codex, but it can't stop to ask: no approvals and no sandbox (its sandbox can't reach
+        // the credential store, so git and gh fail in it).
+        '--dangerously-bypass-approvals-and-sandbox',
+      ];
+      return { args: ctx.resumeId ? ['resume', ...args, ctx.resumeId, ctx.prompt] : [...args, '--', ctx.prompt], env: {} };
+    }
+    case 'opencode': {
+      const config = {
+        plugin: [ctx.plugin],
+        instructions: [ctx.files.system],
+        autoupdate: false, // several agents starting at once must not each reinstall it
+        permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }, // it can't stop to ask either
+        ...(ctx.browser ? { mcp: { playwright: { type: 'local', command: [ctx.browser.command, ...ctx.browser.args], enabled: true } } } : {}),
+      };
+      const args = [
+        ctx.cwd,
+        '--auto',
+        ...(ctx.model ? ['--model', ctx.model] : []),
+        ...(ctx.resumeId ? ['--session', ctx.resumeId] : []),
+        '--prompt',
+        ctx.prompt,
+      ];
+      return { args, env: { OPENCODE_CONFIG_CONTENT: JSON.stringify(config), CUBEFARM_NOTIFY_URL: ctx.notify.url } };
+    }
+  }
+}
+
+// ---------- prompts the office answers ----------
+
+const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder/i;
+
+/**
+ * The key that moves a CLI's folder-trust question toward trusting the office's own worktree: Enter when the
+ * selected option says yes, Down when it says no (Claude Code selects "No, exit" first), null when there's no such
+ * question on screen.
+ */
+export function trustKey(screen: string): 'enter' | 'down' | null {
+  if (!TRUST_PROMPT.test(screen)) return null;
+  const selected = screen.match(/^\s*[❯›]\s*(?:\d+\.\s*)?(.+)$/m)?.[1] ?? '';
+  if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
+  if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
+  return null;
+}
+
+// ---------- helper scripts the CLIs run ----------
+
+/** Claude Code's status line: posts its data (cost, usage limits) to the office and shows the office's line. */
+export const STATUSLINE_SOURCE = String.raw`// cubefarm: Claude Code's status line. Forwards the session's status to the office and prints the office's line.
+const url = process.argv[2];
+let body = '';
+process.stdin.on('data', (c) => (body += c));
+process.stdin.on('end', async () => {
+  try {
+    const status = JSON.parse(body);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hook_event_name: 'StatusLine', session_id: status.session_id, cost: status.cost, rate_limits: status.rate_limits }),
+      signal: AbortSignal.timeout(2000),
+    });
+    const out = await res.json();
+    process.stdout.write(String(out.statusLine ?? ''));
+  } catch {
+    process.stdout.write('cubefarm');
+  }
+});
+`;
+
+/** Codex's notify program: Codex runs it with a JSON argument when a turn completes. */
+export const NOTIFY_SOURCE = String.raw`// cubefarm: Codex's notify program. Tells the office a turn is complete.
+const [url, payload] = process.argv.slice(2);
+let event = {};
+try {
+  event = JSON.parse(payload ?? '{}');
+} catch {}
+if (event.type === 'agent-turn-complete') {
+  const input = String((event['input-messages'] ?? [])[0] ?? '').slice(0, 300);
+  fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hook_event_name: 'TurnComplete', session_id: event['thread-id'] ?? null, last_assistant_message: event['last-assistant-message'] ?? '', input }),
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => {});
+}
+`;
+
+/** OpenCode plugin: reports its session and when it goes idle (a turn is complete). No imports: loaded from a file. */
+export const OPENCODE_PLUGIN_SOURCE = String.raw`// cubefarm: tells the office when OpenCode's session goes idle.
+export default async function CubefarmPlugin({ client } = {}) {
+  const url = process.env.CUBEFARM_NOTIFY_URL;
+  if (!url) return {};
+  let root;
+  const post = (body) =>
+    fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(3000) }).catch(() => {});
+  const lastReply = async (id) => {
+    try {
+      const res = await client.session.messages({ path: { id } });
+      const reply = (res?.data ?? []).filter((m) => m?.info?.role === 'assistant').pop();
+      return (reply?.parts ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join('\n').trim();
+    } catch {
+      return '';
+    }
+  };
+  return {
+    event: async ({ event }) => {
+      const props = event?.properties ?? {};
+      if (event?.type === 'session.created' && !props.info?.parentID && !root) root = props.info?.id;
+      const sessionID = props.sessionID ?? props.info?.id;
+      if (event?.type === 'session.idle' && (!root || sessionID === root)) {
+        post({ hook_event_name: 'TurnComplete', session_id: sessionID ?? null, last_assistant_message: sessionID ? await lastReply(sessionID) : '' });
+      }
+      if (event?.type === 'session.error') post({ hook_event_name: 'TurnError', session_id: sessionID ?? null, error: String(props.error?.data?.message ?? props.error?.name ?? 'error') });
+    },
+  };
+}
+`;

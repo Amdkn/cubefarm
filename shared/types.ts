@@ -128,6 +128,35 @@ export type AgentLook = 'feminine' | 'masculine';
 /** What an agent is currently doing: implementing an issue, testing a PR, or fixing a PR after QA. */
 export type AgentTask = 'issue' | 'qa' | 'fix';
 
+/**
+ * How agents run. terminal: each agent is the real coding-agent CLI in its own terminal, shown live in the office.
+ * sdk: Claude Code through the Agent SDK, its stream turned into log lines.
+ */
+export type AgentRuntime = 'terminal' | 'sdk';
+
+/** The coding-agent CLI an agent runs in its terminal. The CEO is always Claude Code. */
+export type AgentCli = 'claude' | 'codex' | 'opencode';
+
+/** A coding-agent CLI the office knows how to run, and whether it's installed on this machine. */
+export interface CliView {
+  id: AgentCli;
+  label: string;
+  installed: boolean;
+  version: string | null;
+  /** Hooks report every tool call and enforce the guard rails; the others report only when a turn ends. */
+  integrated: boolean;
+}
+
+/** Messages on an agent's terminal socket (/ws/term?agent=<id>), server to browser. */
+export type TermServerMessage =
+  | { t: 'snapshot'; data: string; cols: number; rows: number; live: boolean } // the screen and scrollback so far
+  | { t: 'data'; data: string }
+  | { t: 'size'; cols: number; rows: number } // another viewer resized the terminal
+  | { t: 'live'; live: boolean }; // a CLI is (or is no longer) running in it
+
+/** Browser to server: keystrokes go to the running CLI; the size is the viewer's fitted terminal. */
+export type TermClientMessage = { t: 'input'; data: string } | { t: 'resize'; cols: number; rows: number };
+
 export interface AgentView {
   id: string;
   name: string;
@@ -145,6 +174,8 @@ export interface AgentView {
   skin: string;
   model: string; // '' = use the swarm default model, or a model id / alias
   effort: EffortLevel | ''; // '' = use the swarm default effort
+  cli: AgentCli | ''; // the CLI they run in the terminal runtime ('' = the office default)
+  terminal: boolean; // they have a terminal to watch (the terminal runtime); otherwise their log lines are the screen
   status: AgentStatus;
   issueNumber: number | null; // devs: the issue being worked on
   issueTitle: string | null; // devs: issue title; QA: title of the PR under test
@@ -197,7 +228,8 @@ export interface SwarmSettings {
   sessionLimit: number; // most Claude Code sessions running at once; 0 = no limit
   defaultModel: string;
   defaultEffort: EffortLevel;
-  permissionMode: 'guarded' | 'bypass';
+  runtime: AgentRuntime;
+  defaultCli: AgentCli; // what developers and QA testers run in their terminals unless they have their own
   hiring: 'approve' | 'auto'; // CEO proposals wait for the manager, or go through while the floor is under teamCap
   teamCap: number; // most agents per floor the CEO may reach without the manager's approval (auto mode)
   ceoHeartbeatMin: number; // minutes between the CEO's periodic reviews; 0 = off
@@ -291,6 +323,7 @@ export interface WorldSnapshot {
   officeCommit?: string | null; // short sha the server started on (absent on servers without self-update)
   officeUpdate?: OfficeUpdateView;
   usage: UsageView;
+  clis: CliView[];
 }
 
 export type ServerEvent =
@@ -310,6 +343,7 @@ export type ServerEvent =
   | { type: 'phoneRead'; at: number }
   | { type: 'officeUpdate'; officeUpdate: OfficeUpdateView }
   | { type: 'usage'; usage: UsageView }
+  | { type: 'clis'; clis: CliView[] }
   | { type: 'toast'; level: 'info' | 'success' | 'error'; text: string };
 
 export interface GhRepoSummary {

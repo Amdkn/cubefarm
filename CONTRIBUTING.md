@@ -43,6 +43,9 @@ scripts/office.mjs  the launcher for a checkout (npm run dev / demo / start): ru
 server/  Node + Express + ws
   swarm.ts        orchestrator: floors, agents, scheduling, persistence, websocket fan-out
   agentRunner.ts  one Claude Agent SDK session per agent; turns its stream into terminal lines
+  cliRunner.ts    one agent as the real CLI in a pseudo-terminal: hooks, turn endings, the CEO's tools over MCP
+  clis.ts         the CLIs agents can run (Claude Code, Codex, OpenCode): finding them, their command lines
+  terminal.ts     each agent's terminal: a headless xterm mirror, its viewers, keystrokes to the running CLI
   github.ts       everything GitHub, via the gh CLI
   workspace.ts    clones + per-agent git worktrees
   previews.ts     one preview per floor: ports, statuses, start / stop
@@ -51,7 +54,7 @@ server/  Node + Express + ws
 shared/types.ts   the websocket / REST contract
 ```
 
-The server streams everything to the browser over one websocket (`/ws`). Laptop screens and the whiteboard are canvases drawn from that data and used as textures. They only repaint when something changed, and less often when you're far away.
+The server streams everything to the browser over one websocket (`/ws`); an open terminal panel has its own (`/ws/term?agent=<id>`). Laptop screens and the whiteboard are canvases drawn from that data and used as textures. They only repaint when something changed, and less often when you're far away.
 
 ## Publishing
 

@@ -1111,6 +1111,48 @@ input.inline:focus {
   color: #ff9e64;
   animation: blink 1.4s ease-in-out infinite;
 }
+.live-term {
+  display: flex;
+  flex-direction: column;
+  min-height: 200px;
+  min-width: 0;
+  background: #1b1b29;
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.live-term-screen {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+/* The padding sits on .xterm itself: the fit addon subtracts that element's padding, not its parent's. */
+.live-term-screen .xterm {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 8px 4px 4px 10px;
+}
+.live-term-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 6px;
+  color: #8d8da8;
+  font-size: 0.78rem;
+  border-top: 1px solid #2c2c42;
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #55566e;
+  flex: none;
+}
+.live-dot-on {
+  background: #50fa7b;
+  box-shadow: 0 0 6px #50fa7b;
+}
 @keyframes blink {
   50% {
     opacity: 0.55;

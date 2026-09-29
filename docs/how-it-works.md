@@ -10,7 +10,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
    - If a session fails, its issue goes back on the board for someone else, and the agent gets new work after a two-minute cooldown. An issue that fails twice waits for you to assign it by hand.
    - If Claude turns a session away because your usage limit is reached, the office starts no new work until the limit resets.
    - Before that, when Claude warns that usage is getting high, the office paces itself until the window resets (an hour if Claude doesn't say): QA, fixes and CEO jobs start as usual, but new issues only start while fewer sessions than **Sessions while pacing** (manager's console → Settings, default 3) are running. Your phone gets a message when pacing starts and when it ends.
-2. **In progress.** The server fetches the repo and creates a git worktree for that developer on the branch `swarm/issue-<n>-<agent>`, branched from the default branch. A Claude Code session starts there with the issue text. The developer implements the change, runs the project's checks, pushes the branch and opens a PR with `gh pr create` that says `Closes #<n>`.
+2. **In progress.** The server fetches the repo and creates a git worktree for that developer on the branch `swarm/issue-<n>-<agent>`, branched from the default branch. The developer's coding agent starts there with the issue text. The developer implements the change, runs the project's checks, pushes the branch and opens a PR with `gh pr create` that says `Closes #<n>`.
 3. **In QA.** The PR is handed to the floor's QA lab. A free QA tester checks out the PR head in their own worktree; when every tester is busy, a free developer who didn't write the PR covers for them, `testing` specialists first. The tester then:
    - reads the PR and the linked issue to work out the acceptance criteria
    - reviews the diff like a code reviewer: bugs, unhandled errors and edge cases, security problems, leftover debug code, missing tests
@@ -18,7 +18,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
    - exercises the feature in a real headless browser (Playwright), including phone sizes and edge cases, taking screenshots of each important state
    - returns a structured report: a verdict, the checks performed, the commands run, and a caption for each screenshot
 4. **Evidence on the PR.** The server uploads the screenshots to an orphan branch called `swarm-qa-evidence`, so evidence never lands in your code, and posts a comment on the PR. The comment contains the verdict, a table of checks, the commands run, and the screenshots.
-5. **Fail → fix → re-test.** If QA fails, the report goes back to the developer who wrote the PR, who resumes their own Claude Code session and pushes fixes to the same branch. If they're busy on something else, any free developer takes the fix instead. The PR then goes back to QA for the next round. After 3 failed rounds it's flagged **needs you**.
+5. **Fail → fix → re-test.** If QA fails, the report goes back to the developer who wrote the PR, who resumes their own session and pushes fixes to the same branch. If they're busy on something else, any free developer takes the fix instead. The PR then goes back to QA for the next round. After 3 failed rounds it's flagged **needs you**.
 6. **Merge.** Once QA passes, the PR moves to **Ready to merge**. With **auto-merge** on for the floor (the default; switch it in the manager's console or on the Kanban board), the office takes it from there:
    - It waits for GitHub's checks (Actions, Vercel and so on) and merges as soon as they're green, but only the exact commit QA signed off on. Commits pushed after the sign-off go back through QA first.
    - If checks fail, or the PR conflicts with the default branch because other work merged first, a free developer gets the failing checks or the conflict, fixes the branch, and QA re-tests it when the code changed. After 3 such fixes it's flagged **needs you**.
@@ -38,7 +38,7 @@ You can message an agent at any time. While they're working, the message is inje
 ## QA testers
 
 - Every floor always has at least one QA tester: one is hired when a repo is connected, and the last one can't be let go. You can hire up to 3 per floor (manager's console → Team, or press `E` on an empty QA station).
-- QA testers use the same model and effort settings as everyone else. In guarded mode they can't push, comment on, review, merge or edit PRs or issues. The office posts their report for them.
+- QA testers use the same model and effort settings as everyone else. Their instructions tell them not to push, comment on, review, merge or edit PRs or issues: the office posts their report for them.
 - QA is automatic for every PR from a `swarm/` branch, whether or not auto-assign is on.
 
 ## The team
@@ -47,26 +47,33 @@ Agents get names from a pool of computing pioneers (developers) and fictional de
 
 ## Models and usage
 
-- Every agent defaults to **Claude Opus 5.5 (`claude-opus-5-5`) at medium effort**. You can change the default, or set it per agent, in the manager's console.
-- Agents run on your Claude **subscription**: the server removes `ANTHROPIC_API_KEY` and all other inherited `CLAUDE_*` / `ANTHROPIC_*` variables before starting each agent, so the SDK uses your Claude Code login.
+- Developers and QA default to **Claude Code with Claude Opus 5.5 (`claude-opus-5-5`) at medium effort**. In the manager's console, Settings sets the default coding agent, its model and the effort; the Team tab overrides any of them per agent. The default model belongs to the default coding agent: an agent on another one uses that agent's own default unless you name a model for them. The CEO runs Claude Code, with its own model and effort on the CEO tab.
+- Agents run on your Claude **subscription**: the server removes `ANTHROPIC_API_KEY` and all other inherited `CLAUDE_*` / `ANTHROPIC_*` variables before starting each agent, so Claude Code uses your login. Codex and OpenCode agents use whatever those CLIs are signed in with, and don't count toward Claude's usage pacing.
 - Every agent draws on the same subscription usage limits. By default every agent with work runs at once; set a **Session limit** in the manager's console to cap it. When a limit is hit, the agent's terminal shows it.
+
+## Agents' terminals
+
+By default (manager's console → Settings → **How agents run: Real terminals**) every agent is the actual coding CLI running in its own pseudo-terminal on your machine. Open a desk to watch it live; click the terminal to type into it (while it has focus, `Esc` goes to the agent, which interrupts Claude Code). The office keeps a copy of each agent's screen and scrollback, so a terminal opened late shows everything so far, and it's saved to `<SWARM_HOME>/terminals/` so it survives a restart. The message box under the terminal types into it for you, or, when the agent isn't running, resumes their session.
+
+- **Claude Code** (the default; the office runs the copy that ships with the Agent SDK, the one `cubefarm login` signs in) reports every step to the office through HTTP hooks passed with `--settings`: each tool call (the hook also approves it, so the CLI never stops to ask), each finished turn with its final message, failures, and, through its status line, cost and usage limits for pacing. The status line under its prompt shows who the agent is and what they're on.
+- **Codex** and **OpenCode** (experimental) run if they're installed: pick one for everyone (Settings → *Default coding agent*) or per agent (Team). They get the same prompt and instructions, but only tell the office when a turn ends (Codex's `notify` program, an OpenCode plugin), so the office shows their task rather than each step. Their browser screenshots still reach the office: each session's Playwright server saves its snapshots and unnamed screenshots in the session's own folder (not the worktree), and the office collects new images from there, so their QA reports carry screenshots too. Neither runs sandboxed or stops for approvals (see the safety model). OpenCode's self-update is switched off, since several agents starting at once would each reinstall it. The CEO always runs Claude Code.
+- A session is finished when the CLI's turn ends and it doesn't pick up another prompt within 3 seconds. A developer's CLI then stays at its prompt for 30 minutes: type into it and the office takes it on as a follow-up, and the message box (or the office itself, e.g. to fix QA findings) continues in the same CLI. QA testers' and the CEO's CLIs close. After that, a follow-up resumes the session in a new CLI (only the CLI that made a session can resume it).
+- The office answers the folder-trust question for its own worktrees (moving to "Yes" first where the CLI selects "No"). Anything else a CLI asks before it starts (sign in, first-run screens) waits for you in its terminal, and the agent's log says so.
+- **Agent SDK** runs Claude Code through the SDK instead, shown as a log of its steps: the office's original runtime.
 
 ## Safety model
 
-Agents run on your machine, so the default **guarded** permission mode:
+Agents behave like the coding agents you run in your own terminal: they load your setup (user and project settings, `CLAUDE.md`, skills, plugins, MCP servers and claude.ai connectors; Codex and OpenCode their own config), and nothing runs in a sandbox. On top of that the office adds its hooks, its Playwright server when a floor tests in a browser, the office tools for the CEO, and its instructions.
 
-- auto-approves file edits inside the agent's own worktree and refuses writes anywhere else
-- refuses force-pushes, pushes to the default branch, `gh pr merge` (the office does the merging), repo admin commands and a few destructive shell patterns
-- gives agents only the Playwright MCP server: claude.ai connectors (Gmail, Drive, …), user-level MCP servers and plugins are not loaded (`strictMcpConfig`)
-- disables `AskUserQuestion`. Nobody is watching live, so agents decide and record their assumptions in the PR
+Nobody may be watching to answer a permission question, so the office approves every tool call (Claude Code through its PreToolUse hook, Codex with `--dangerously-bypass-approvals-and-sandbox`, OpenCode through its permission config). The office's workflow is in each agent's instructions, not enforced: push your own branch and open a PR, never push to the default branch, force-push or merge (the office merges after QA), and, for QA testers, leave GitHub alone because the office posts their report. `AskUserQuestion` and plan mode stay off for Claude Code: agents decide and record their assumptions in the PR (you can still type into any agent's terminal).
 
-**Bypass** mode turns every check off. Use it only in a disposable VM or container.
-
-The repo's own project settings (`CLAUDE.md`, `.claude/settings.json`, skills) are loaded, so agents follow each project's conventions. Project `.mcp.json` servers are not loaded.
+Agents can do anything your own coding agent in a terminal can. Run the office where you'd run those.
 
 ## Where things live
 
 - `~/.cubefarm/state.json`: floors, agents, settings and terminal history (`SWARM_HOME` overrides the folder)
+- `~/.cubefarm/terminals/<agent>.ansi`: each agent's terminal screen and scrollback
+- `~/.cubefarm/sessions/<token>/`: a running CLI session's settings, MCP config and instructions (removed when it ends); `~/.cubefarm/bin/`: the small scripts the CLIs call back to the office with
 - `~/.cubefarm/workspaces/<owner>__<repo>/main`: a clone of each repo
 - `~/.cubefarm/workspaces/<owner>__<repo>/desks/<agent>`: one worktree per agent
 

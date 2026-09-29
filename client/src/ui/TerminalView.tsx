@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { isBusy, kanbanFor, agentsOnRepo, useStore } from '../store';
 import { confirmDialog } from './Confirm';
+import { LiveTerminal } from './LiveTerminal';
+import { effectiveModel } from '../../../shared/models';
 import { Markdown } from './Markdown';
 import { MessageBox } from './MessageBox';
 import { closeOverlay, Panel } from './Overlays';
@@ -33,6 +35,7 @@ export function TerminalView({ agentId }: { agentId: string }) {
   const repo = useStore((s) => s.repos.find((r) => r.id === s.agents[agentId]?.repoId));
   const allAgents = useStore((s) => s.agents);
   const settings = useStore((s) => s.settings);
+  const clis = useStore((s) => s.clis);
   const [text, setText] = useState('');
   const [issue, setIssue] = useState('');
   const [busy, setBusy] = useState(false);
@@ -74,6 +77,8 @@ export function TerminalView({ agentId }: { agentId: string }) {
     }
   };
   const working = isBusy(agent);
+  const cli = agent.role === 'ceo' ? 'claude' : agent.cli || settings.defaultCli;
+  const cliName = clis.find((c) => c.id === cli)?.label ?? cli;
   const issueUrl = agent.issueNumber ? `https://github.com/${repo.fullName}/issues/${agent.issueNumber}` : null;
   const canMessage = working || (!isQa && !!agent.branch && agent.status !== 'idle');
   const qaRec = agent.prNumber ? qaRecords[`${repo.id}#${agent.prNumber}`] : undefined;
@@ -130,12 +135,14 @@ export function TerminalView({ agentId }: { agentId: string }) {
           </a>
         )}
         {agent.branch && <code>{agent.branch}</code>}
+        {settings.runtime === 'terminal' && <span className="chip" title="The coding agent in their terminal">⌨️ {cliName}</span>}
         <span className="muted">
-          {agent.model || settings.defaultModel} · {agent.effort || settings.defaultEffort} effort
+          {(agent.role === 'ceo' ? agent.model : effectiveModel(agent.model, settings.runtime === 'terminal' ? cli : 'claude', settings, 'claude-opus-5-5')) || 'default model'} ·{' '}
+          {agent.effort || settings.defaultEffort} effort
         </span>
         {agent.startedAt && <span className="muted">⏱ {elapsed(agent.startedAt, working ? null : agent.endedAt)}</span>}
         {agent.turns > 0 && <span className="muted">{agent.turns} turns</span>}
-        {agent.costUsd > 0 && <span className="muted" title="API-equivalent cost reported by Claude Code; subscription usage is billed by plan">≈${agent.costUsd.toFixed(2)}</span>}
+        {agent.costUsd > 0 && <span className="muted" title="API-equivalent cost reported by the coding agent; subscription usage is billed by plan">≈${agent.costUsd.toFixed(2)}</span>}
       </div>
       {agent.lastError && agent.status !== 'working' && <div className="term-error">⚠️ {agent.lastError}</div>}
       {agent.brief && (
@@ -146,22 +153,26 @@ export function TerminalView({ agentId }: { agentId: string }) {
       )}
 
       <div className={`term-split ${agent.hasScreenshot ? 'term-split-2' : ''}`}>
-        <div
-          className="term"
-          ref={scroller}
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-          }}
-        >
-          {log.length === 0 && <div className="term-line term-system">(no output yet)</div>}
-          {log.map((l) => (
-            <div key={l.id} className={`term-line term-${l.kind}`}>
-              {l.text || ' '}
-            </div>
-          ))}
-          {working && <div className="term-line term-spin">✻ {agent.status === 'preparing' ? 'Setting up worktree' : toolVerb(agent.currentTool) || 'Thinking'}… ({elapsed(agent.startedAt, null)})</div>}
-        </div>
+        {agent.terminal ? (
+          <LiveTerminal agentId={agent.id} />
+        ) : (
+          <div
+            className="term"
+            ref={scroller}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            }}
+          >
+            {log.length === 0 && <div className="term-line term-system">(no output yet)</div>}
+            {log.map((l) => (
+              <div key={l.id} className={`term-line term-${l.kind}`}>
+                {l.text || ' '}
+              </div>
+            ))}
+            {working && <div className="term-line term-spin">✻ {agent.status === 'preparing' ? 'Setting up worktree' : toolVerb(agent.currentTool) || 'Thinking'}… ({elapsed(agent.startedAt, null)})</div>}
+          </div>
+        )}
         {agent.hasScreenshot && (
           <div className="browser">
             <div className="browser-bar">🔒 {agent.browserUrl ?? 'about:blank'}</div>
@@ -189,10 +200,14 @@ export function TerminalView({ agentId }: { agentId: string }) {
           aria-label={`Message ${agent.name}`}
           title="Enter sends · Shift+Enter adds a new line"
           placeholder={
-            working ? `Tell ${agent.name} something while they work…` : canMessage ? `Ask ${agent.name} for a follow-up (resumes their session)…` : `Assign an issue to get ${agent.name} started`
+            working
+              ? `Tell ${agent.name} something while they work${agent.terminal ? ' (typed into their terminal)' : ''}…`
+              : canMessage
+                ? `Ask ${agent.name} for a follow-up (resumes their session)…`
+                : `Assign an issue to get ${agent.name} started`
           }
           disabled={!canMessage}
-          autoFocus
+          autoFocus={!agent.terminal}
         />
         <button className="btn" disabled={busy || !canMessage || !text.trim()}>
           Send

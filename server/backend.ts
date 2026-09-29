@@ -1,9 +1,11 @@
 import * as github from './github.ts';
 import * as workspace from './workspace.ts';
 import { startSession, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
+import { startCliSession, terminalsAvailable } from './cliRunner.ts';
+import { detectClis } from './clis.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
-import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import type { CliView, GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
 
 /** Everything the swarm needs from the outside world. The demo backend fakes all of it. */
 export interface Backend {
@@ -40,7 +42,12 @@ export interface Backend {
   removeDesk(fullName: string, agentSlug: string): Promise<void>;
   /** Stop processes an agent left running (dev servers on its port, anything started in its desk). */
   releaseDesk(fullName: string, agentSlug: string, port: number): Promise<void>;
-  startSession(opts: SessionOptions, cb: SessionCallbacks, defaultBranch: string): SessionHandle;
+  /** An agent session: the real CLI in the agent's terminal when opts.terminal is set, else an Agent SDK session. */
+  startSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle;
+  /** Terminals can run here (the native pseudo-terminal module loaded). */
+  terminals: boolean;
+  /** The coding-agent CLIs installed on this machine. */
+  detectClis(): Promise<CliView[]>;
   /** Run a floor's app for the preview monitor (its own worktree, its own port). */
   previews: PreviewBackend;
   /** The running office's own folder and its launcher, for the office's self-update. */
@@ -77,7 +84,9 @@ export const realBackend: Backend = {
   prepareDesk: workspace.prepareDesk,
   removeDesk: workspace.removeDesk,
   releaseDesk: workspace.releaseDesk,
-  startSession,
+  startSession: (opts, cb) => (opts.terminal ? startCliSession(opts, cb) : startSession(opts, cb)),
+  terminals: terminalsAvailable,
+  detectClis,
   previews: realPreviews,
   office: realOffice,
 };

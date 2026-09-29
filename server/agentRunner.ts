@@ -1,8 +1,10 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
+import type { AgentCli, AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { UsageWarning } from './pacing.ts';
+import type { AgentTerminal } from './terminal.ts';
 import { VERSION } from './config.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
@@ -15,7 +17,6 @@ export interface SessionOptions {
   model: string; // e.g. 'claude-opus-5-5'
   effort: EffortLevel;
   browserTesting: boolean;
-  permissionMode: 'guarded' | 'bypass';
   additionalDirectories: string[]; // read-only reference clones of linked repos
   role: AgentRole;
   /** JSON schema for a structured final answer (QA reports). */
@@ -23,6 +24,15 @@ export interface SessionOptions {
   resumeSessionId?: string;
   /** The CEO's in-process MCP server (mcp__office__*). */
   office?: OfficeTools;
+  /** The terminal runtime: the agent's terminal and the CLI to run in it. Without one: an Agent SDK session. */
+  terminal?: AgentTerminal;
+  cli?: AgentCli;
+  /** Who and on what, for the CLI's session name and status line, e.g. "Ada · #12 Add dark mode". */
+  label?: string;
+  /** Leave the CLI waiting at its prompt when the task is done, for the manager and for follow-ups. */
+  keepAlive?: boolean;
+  /** The prompt was typed at the CLI's prompt by the manager: it's already running, so it isn't sent again. */
+  typed?: boolean;
 }
 
 export interface LogEntry {
@@ -91,60 +101,57 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
   }
 }
 
-// ---------- guard rails for the default "guarded" permission mode ----------
+// ---------- permissions and screenshots ----------
 
-const WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+// Agents work like the manager's own CLI, but nobody may be watching to answer a permission question: every tool call
+// is approved. The office's rules (branches, pull requests, QA leaving GitHub alone) are in their instructions only.
+const allowAll: CanUseTool = async (_toolName, input) => ({ behavior: 'allow', updatedInput: input });
 
-const BLOCKED_COMMANDS: { re: RegExp; why: string }[] = [
-  { re: /\bgit\s+push\b[^\n]*(\s--force\b|\s-f\b|\s--force-with-lease\b|\s\+\S)/, why: 'force-pushing is not allowed' },
-  { re: /\bgh\s+pr\s+merge\b/, why: 'the office merges pull requests once QA and the checks pass, not agents' },
-  { re: /\bgh\s+(repo\s+(delete|edit|rename|archive)|secret|auth|release\s+delete|api\s+-X\s*DELETE)\b/, why: 'repository administration is off-limits' },
-  { re: /\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+(\/|~|[A-Za-z]:[\\/]?)(\s|$)/, why: 'deleting a filesystem root is not allowed' },
-  { re: /\b(shutdown|format\s+[a-z]:|mkfs|Remove-Item\s+[^\n]*-Recurse[^\n]*[A-Za-z]:\\\s*$)/i, why: 'destructive system command' },
-  { re: /\bgit\s+worktree\b/, why: 'worktrees are managed by the swarm' },
-];
-
-function isInside(child: string, parent: string) {
-  const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+/**
+ * A Playwright screenshot saved to a file (browser_take_screenshot with a filename) comes back as a link, not an
+ * image: the file, read from the agent's worktree, so it still counts as QA evidence.
+ */
+export function screenshotFile(cwd: string, text: string): { data: Buffer; mime: string } | null {
+  const file = text.match(/\]\(([^)\s]+\.(png|jpe?g))\)/i);
+  if (!file) return null;
+  try {
+    return { data: fs.readFileSync(path.resolve(cwd, file[1])), mime: /png$/i.test(file[2]) ? 'image/png' : 'image/jpeg' };
+  } catch {
+    return null;
+  }
 }
 
-// QA testers verify; they never change what's on GitHub. The office posts their report for them.
-const QA_BLOCKED: { re: RegExp; why: string }[] = [
-  { re: /\bgit\s+push\b/, why: 'QA testers do not push code' },
-  { re: /\bgh\s+(pr|issue)\s+(merge|close|reopen|review|comment|edit|ready|create)\b/, why: 'QA testers report back to the office instead of changing PRs or issues' },
-];
+const IMAGE_MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg' };
 
-function guardedCanUseTool(cwd: string, defaultBranchPush: RegExp, role: AgentRole): CanUseTool {
-  return async (toolName, input, { blockedPath }) => {
-    if (toolName.startsWith('mcp__') && !toolName.startsWith('mcp__playwright__') && !(role === 'ceo' && toolName.startsWith('mcp__office__'))) {
-      return { behavior: 'deny', message: 'Only the Playwright browser tools are available to swarm agents.' };
+/**
+ * Screenshots in a browser's output folder that aren't in `seen` yet, oldest first (Playwright names them
+ * page-<timestamp>). Files changed in the last second may still be being written, so they wait for the next look.
+ */
+export function newScreenshots(dir: string, seen: Set<string>, now = Date.now()): { name: string; file: string; mime: string }[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const found: { name: string; file: string; mime: string }[] = [];
+  for (const name of names.sort()) {
+    const mime = IMAGE_MIME[path.extname(name).toLowerCase()];
+    const file = path.join(dir, name);
+    if (!mime || seen.has(name)) continue;
+    try {
+      if (now - fs.statSync(file).mtimeMs < 1000) continue;
+    } catch {
+      continue;
     }
-    if (WRITE_TOOLS.has(toolName)) {
-      const target = String(input.file_path ?? input.notebook_path ?? '');
-      if (target && !isInside(path.resolve(cwd, target), cwd)) {
-        return { behavior: 'deny', message: `You may only edit files inside your worktree (${cwd}).` };
-      }
-    }
-    if (toolName === 'Bash' || toolName === 'PowerShell') {
-      const cmd = String(input.command ?? '');
-      for (const rule of role === 'qa' ? [...BLOCKED_COMMANDS, ...QA_BLOCKED] : BLOCKED_COMMANDS) {
-        if (rule.re.test(cmd)) return { behavior: 'deny', message: `Blocked by cubefarm: ${rule.why}.` };
-      }
-      if (defaultBranchPush.test(cmd)) {
-        return { behavior: 'deny', message: 'Push your own branch and open a PR; pushing to the default branch is not allowed.' };
-      }
-      if (blockedPath && /\b(rm|del|rmdir|mv|move|Remove-Item)\b/i.test(cmd) && !isInside(path.resolve(blockedPath), cwd)) {
-        return { behavior: 'deny', message: `That command touches ${blockedPath}, which is outside your worktree.` };
-      }
-    }
-    return { behavior: 'allow', updatedInput: input };
-  };
+    found.push({ name, file, mime });
+  }
+  return found;
 }
 
 // ---------- formatting the stream into terminal lines ----------
 
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 function rel(cwd: string, p: unknown) {
   const s = String(p ?? '');
@@ -156,7 +163,7 @@ function rel(cwd: string, p: unknown) {
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Agents often prefix commands with `cd "<worktree>" &&` and print absolute paths; show them relative instead. */
-function tidyPaths(cwd: string, text: string): string {
+export function tidyPaths(cwd: string, text: string): string {
   let out = text;
   for (const v of new Set([cwd, cwd.replaceAll('\\', '/')])) {
     out = out.replace(new RegExp(`^cd\\s+"?${escapeRe(v)}"?\\s*(&&|;)\\s*`, 'i'), '');
@@ -165,7 +172,7 @@ function tidyPaths(cwd: string, text: string): string {
   return out;
 }
 
-function describeTool(cwd: string, name: string, input: Record<string, unknown>): string {
+export function describeTool(cwd: string, name: string, input: Record<string, unknown>): string {
   switch (name) {
     case 'Bash':
     case 'PowerShell':
@@ -190,6 +197,8 @@ function describeTool(cwd: string, name: string, input: Record<string, unknown>)
       return `Subagent: ${input.description ?? ''}`;
     case 'TodoWrite':
       return 'Update todo list';
+    case 'ToolSearch':
+      return `Load tools ${String(input.query ?? '').replace(/^select:/, '')}`;
   }
   if (name.startsWith('mcp__playwright__')) {
     const action = name.replace('mcp__playwright__browser_', '').replace('mcp__playwright__', '');
@@ -223,7 +232,7 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
   return `🏢 ${action}(${clip(JSON.stringify(input), 120)})`;
 }
 
-function todoLines(input: Record<string, unknown>): LogEntry[] {
+export function todoLines(input: Record<string, unknown>): LogEntry[] {
   const todos = Array.isArray(input.todos) ? (input.todos as { content?: string; status?: string }[]) : [];
   return todos.slice(0, 12).map((t) => ({
     kind: 'result' as const,
@@ -231,7 +240,7 @@ function todoLines(input: Record<string, unknown>): LogEntry[] {
   }));
 }
 
-function resultText(content: unknown): string {
+export function resultText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content
@@ -244,7 +253,7 @@ function resultText(content: unknown): string {
 
 const lineCount = (text: string) => text.replace(/\r/g, '').split('\n').filter((l) => l.trim() !== '').length;
 
-function summariseResult(cwd: string, tool: string, text: string): LogEntry[] {
+export function summariseResult(cwd: string, tool: string, text: string): LogEntry[] {
   // Claude Code-style one-liners for the chatty file tools
   if (tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') return [{ kind: 'result', text: '  ⎿ Updated' }];
   if (tool === 'Write') return [{ kind: 'result', text: '  ⎿ Saved' }];
@@ -259,7 +268,7 @@ function summariseResult(cwd: string, tool: string, text: string): LogEntry[] {
 
 // ---------- the session ----------
 
-export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, defaultBranch: string): SessionHandle {
+export function startSession(opts: SessionOptions, callbacks: SessionCallbacks): SessionHandle {
   let done = false;
   const cb: SessionCallbacks = {
     ...callbacks,
@@ -300,9 +309,6 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
   const disallowedTools = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
   if (opts.role === 'ceo') disallowedTools.push('Bash', 'PowerShell', 'NotebookEdit');
 
-  const escaped = defaultBranch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const defaultBranchPush = new RegExp(`\\bgit\\s+push\\b[^\\n]*\\s(HEAD:)?(refs/heads/)?${escaped}(\\s|$)`);
-
   const options: Options = {
     cwd: opts.cwd,
     additionalDirectories: opts.additionalDirectories,
@@ -310,11 +316,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
     env,
     model: opts.model || undefined,
     effort: opts.effort,
-    settingSources: ['project', 'local'],
-    // Agents get exactly the MCP servers passed below: no claude.ai connectors (Gmail, Drive…),
-    // no user-level servers or plugins from the host machine.
-    strictMcpConfig: true,
-    settings: { disableClaudeAiConnectors: true },
+    // The manager's own setup (settings, skills, plugins, MCP servers, connectors), plus the office's servers below.
+    settingSources: ['user', 'project', 'local'],
     systemPrompt: { type: 'preset', preset: 'claude_code', append: opts.systemAppend },
     mcpServers,
     disallowedTools,
@@ -323,9 +326,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
       const line = data.trim();
       if (line && /error|fail/i.test(line)) cb.log([{ kind: 'error', text: clip(line, 200) }]);
     },
-    ...(opts.permissionMode === 'bypass'
-      ? { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }
-      : { permissionMode: 'acceptEdits' as const, canUseTool: guardedCanUseTool(opts.cwd, defaultBranchPush, opts.role) }),
+    permissionMode: 'acceptEdits',
+    canUseTool: allowAll,
     ...(opts.outputSchema ? { outputFormat: { type: 'json_schema' as const, schema: opts.outputSchema } } : {}),
   };
 
@@ -349,7 +351,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
   const handle = (msg: SDKMessage) => {
     clearTimeout(emptyTurn);
     if (done && msg.type === 'assistant' && !stopped) {
-      // The office already treated this session as finished, so it can't approve anything the session does.
+      // The office already treated this session as finished and no longer follows it.
       stopped = true;
       cb.log([{ kind: 'system', text: '■ This session kept working after it had finished, so it was stopped.' }]);
       abort.abort();
@@ -361,7 +363,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
           cb.sessionId(msg.session_id);
           const mcp = msg.mcp_servers.map((s) => `${s.name}:${s.status}`).join(', ');
           cb.log([
-            { kind: 'system', text: `✻ Claude Code ${msg.claude_code_version} · ${msg.model} · ${msg.effort ?? opts.effort} effort · ${opts.permissionMode}` },
+            { kind: 'system', text: `✻ Claude Code ${msg.claude_code_version} · ${msg.model} · ${msg.effort ?? opts.effort} effort` },
             { kind: 'system', text: `  cwd ${msg.cwd}${mcp ? ` · mcp ${mcp}` : ''}` },
           ]);
         } else if (msg.subtype === 'api_retry') {
@@ -415,13 +417,17 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks, 
           if (block.type !== 'tool_result') continue;
           const name = toolNames.get(block.tool_use_id) ?? '';
           const text = resultText(block.content);
+          let images = 0;
           if (Array.isArray(block.content)) {
             for (const part of block.content) {
               if (part.type === 'image' && part.source.type === 'base64') {
+                images += 1;
                 cb.screenshot(Buffer.from(part.source.data, 'base64'), part.source.media_type);
               }
             }
           }
+          const saved = name === 'mcp__playwright__browser_take_screenshot' && !images ? screenshotFile(opts.cwd, text) : null;
+          if (saved) cb.screenshot(saved.data, saved.mime);
           if (name.startsWith('mcp__playwright__')) {
             const url = text.match(/Page URL:\s*(\S+)/);
             if (url) cb.browserUrl(url[1]);

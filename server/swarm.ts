@@ -12,15 +12,20 @@ import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './m
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
+import { isCli } from './clis.ts';
+import { AgentTerminal } from './terminal.ts';
 import { blockers, holdUps, issueSpecialty } from '../shared/issues.ts';
+import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID } from '../shared/types.ts';
 import type {
+  AgentCli,
   AgentLook,
   AgentRole,
   AgentStatus,
   AgentTask,
   AgentView,
   CeoInfo,
+  CliView,
   EffortLevel,
   HireRequestView,
   IssueInfo,
@@ -78,6 +83,7 @@ interface PersistedAgent {
   skin: string;
   model: string;
   effort: EffortLevel | '';
+  cli: AgentCli | ''; // '' = the office's default CLI
   status: AgentStatus;
   issueNumber: number | null;
   issueTitle: string | null;
@@ -89,6 +95,7 @@ interface PersistedAgent {
   costUsd: number;
   turns: number;
   sessionId: string | null;
+  sessionCli: AgentCli | null; // the CLI whose session sessionId is: only it can resume it
   lastError: string | null;
   logTail: LogLine[];
 }
@@ -148,6 +155,7 @@ interface AgentRuntime {
   browserUrl: string | null;
   screenshot: { data: Buffer; mime: string; at: number } | null;
   shots: Shot[]; // every screenshot of the current session (QA evidence)
+  terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
 }
 
 interface RepoRuntime {
@@ -256,6 +264,11 @@ async function removeScreens(agentId: string) {
   await Promise.all(Object.values(MIME_EXT).map((ext) => fs.rm(path.join(SCREENS_DIR, `${agentId}.${ext}`), { force: true })));
 }
 
+// Each agent's terminal (screen and scrollback) is saved too, so the office shows what they did after a restart.
+const TERMINALS_DIR = path.join(HOME_DIR, 'terminals');
+const terminalFile = (agentId: string) => path.join(TERMINALS_DIR, `${agentId}.ansi`);
+const TERMINAL_SAVE_MS = 20_000;
+
 // ---------- QA report ----------
 
 const QA_SCHEMA: Record<string, unknown> = {
@@ -301,10 +314,12 @@ const QA_SCHEMA: Record<string, unknown> = {
 function parseReport(result: SessionResult): QaReport | null {
   let raw: unknown = result.structured;
   if (!raw && result.text) {
-    const json = result.text.match(/\{[\s\S]*\}/);
-    if (json) {
+    // Terminal agents end their last message with the report, usually in a ```json block.
+    const fenced = [...result.text.matchAll(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/g)].map((m) => m[1]).reverse();
+    for (const json of [...fenced, result.text.match(/\{[\s\S]*\}/)?.[0]].filter((j): j is string => !!j)) {
       try {
-        raw = JSON.parse(json[0]);
+        raw = JSON.parse(json);
+        break;
       } catch {
         raw = null;
       }
@@ -334,7 +349,8 @@ export class Swarm {
       sessionLimit: 0,
       defaultModel: DEFAULT_MODEL,
       defaultEffort: 'medium',
-      permissionMode: 'guarded',
+      runtime: 'terminal',
+      defaultCli: 'claude',
       hiring: 'approve',
       teamCap: 6,
       ceoHeartbeatMin: 60,
@@ -394,6 +410,7 @@ export class Swarm {
     handedOver: false, // sessions cut off by the hand-over are the restarted office's to recover
   };
   private lastOfficeView = '';
+  private clis: CliView[] = []; // coding-agent CLIs found on this machine (detected at startup)
 
   constructor(private backend: Backend) {
     this.previews = new Previews(backend, {
@@ -433,6 +450,8 @@ export class Swarm {
           hiredBy: a.hiredBy ?? 'manager',
           look: a.look ?? lookFor(a.name),
           task: a.task ?? (a.issueNumber ? 'issue' : null),
+          cli: isCli(a.cli) ? a.cli : '',
+          sessionCli: a.sessionCli ?? (a.sessionId ? 'claude' : null),
         })),
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
@@ -452,14 +471,17 @@ export class Swarm {
         phoneReadAt: loaded.phoneReadAt ?? 0,
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
-      if (!this.state.settings.defaultModel) this.state.settings.defaultModel = DEFAULT_MODEL;
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
+      if (this.state.settings.runtime !== 'sdk') this.state.settings.runtime = 'terminal';
+      if (!isCli(this.state.settings.defaultCli)) this.state.settings.defaultCli = 'claude';
+      if (!this.state.settings.defaultModel && this.state.settings.defaultCli === 'claude') this.state.settings.defaultModel = DEFAULT_MODEL;
       // "Max concurrent sessions" (default 4) became an optional session limit. The old default goes; a limit the manager chose stays.
-      const old = this.state.settings as SwarmSettings & { maxConcurrent?: number };
+      const old = this.state.settings as SwarmSettings & { maxConcurrent?: number; permissionMode?: string };
       if (old.maxConcurrent !== undefined) {
         if (loaded.settings?.sessionLimit === undefined) old.sessionLimit = old.maxConcurrent === 4 ? 0 : old.maxConcurrent;
         delete old.maxConcurrent;
       }
+      delete old.permissionMode; // the office's rules are instructions now, not a permission mode
       // Offices that were set up before the setup wizard existed skip it.
       if (loaded.settings && loaded.settings.setupDone === undefined && this.state.repos.length > 0) {
         Object.assign(this.state.settings, { setupDone: true, tutorialStep: -1 });
@@ -472,7 +494,7 @@ export class Swarm {
     for (const a of this.state.agents) {
       const tail = a.logTail ?? [];
       for (const l of tail) this.logSeq = Math.max(this.logSeq, l.id + 1);
-      this.agentRt.set(a.id, { log: tail, pending: [], session: null, currentTool: null, browserUrl: null, screenshot: await loadScreen(a.id), shots: [] });
+      this.agentRt.set(a.id, { log: tail, pending: [], session: null, currentTool: null, browserUrl: null, screenshot: await loadScreen(a.id), shots: [], terminal: await this.loadTerminal(a.id) });
       if (BUSY.includes(a.status)) {
         a.status = 'stopped';
         a.lastError = 'The swarm server restarted while this agent was working.';
@@ -517,6 +539,14 @@ export class Swarm {
     if (updated) await this.reportUpdate(updated);
     setInterval(() => this.state.repos.forEach((r, i) => setTimeout(() => void this.syncRepo(r.id), i * 1500)), SYNC_INTERVAL_MS);
     setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
+    setInterval(() => void this.saveTerminals(), TERMINAL_SAVE_MS);
+    void this.backend
+      .detectClis()
+      .then((clis) => {
+        this.clis = clis;
+        this.broadcast({ type: 'clis', clis });
+      })
+      .catch((err) => console.warn('could not look for agent CLIs', err));
     this.save();
     setTimeout(() => this.schedule(), 1000);
   }
@@ -592,6 +622,8 @@ export class Swarm {
       skin: a.skin,
       model: a.model,
       effort: a.effort,
+      cli: a.cli,
+      terminal: !!rt.terminal,
       status: a.status,
       issueNumber: a.issueNumber,
       issueTitle: a.issueTitle,
@@ -643,6 +675,7 @@ export class Swarm {
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
       usage: this.usageNow(),
+      clis: this.clis,
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
       officeUpdate: this.officeHead ? this.officeUpdateView() : undefined,
     };
@@ -1066,6 +1099,7 @@ export class Swarm {
   /** Server shutdown: stop every floor's app so nothing is left holding a preview port. */
   async shutdown(): Promise<void> {
     await this.writeState().catch((err) => console.warn('could not save the state', err));
+    await this.saveTerminals(true);
     await this.previews.stopAll(this.state.repos);
   }
 
@@ -1189,6 +1223,7 @@ export class Swarm {
       title?: string;
       specialty?: string;
       brief?: string;
+      cli?: string;
       hiredBy?: 'manager' | 'ceo';
       appearance?: { color: string; hair: string; skin: string };
     },
@@ -1219,6 +1254,7 @@ export class Swarm {
       skin: opts.appearance?.skin ?? pick(SKIN),
       model: opts.model ?? '',
       effort: EFFORTS.includes(opts.effort as EffortLevel) ? (opts.effort as EffortLevel) : '',
+      cli: isCli(opts.cli) ? opts.cli : '',
       status: 'idle',
       issueNumber: null,
       issueTitle: null,
@@ -1230,11 +1266,12 @@ export class Swarm {
       costUsd: 0,
       turns: 0,
       sessionId: null,
+      sessionCli: null,
       lastError: null,
       logTail: [],
     };
     this.state.agents.push(agent);
-    this.agentRt.set(agent.id, { log: [], pending: [], session: null, currentTool: null, browserUrl: null, screenshot: null, shots: [] });
+    this.agentRt.set(agent.id, { log: [], pending: [], session: null, currentTool: null, browserUrl: null, screenshot: null, shots: [], terminal: null });
     this.appendLog(agent, [
       { kind: 'system', text: role === 'qa' ? `🔍 ${name} joined the QA lab on floor ${repo.floor} (${repo.fullName}).` : `👋 ${name} joined floor ${repo.floor} (${repo.fullName}).` },
       ...(agent.title ? [{ kind: 'system' as const, text: `🪪 ${agent.title}${agent.specialty ? ` · takes swarm:${agent.specialty} issues first` : ''}` }] : []),
@@ -1260,9 +1297,10 @@ export class Swarm {
 
   updateAgent(
     id: string,
-    patch: { name?: string; model?: string; effort?: string; look?: string; title?: string; specialty?: string; brief?: string; color?: string; hair?: string },
+    patch: { name?: string; model?: string; effort?: string; cli?: string; look?: string; title?: string; specialty?: string; brief?: string; color?: string; hair?: string },
   ) {
     const a = this.agent(id);
+    if (patch.cli !== undefined && a.role !== 'ceo') a.cli = isCli(patch.cli) ? patch.cli : '';
     if (patch.name?.trim() && patch.name.trim() !== a.name) {
       a.name = patch.name.trim().slice(0, 24);
       a.look = lookFor(a.name);
@@ -1292,7 +1330,10 @@ export class Swarm {
     }
 
     this.agentRt.get(id)?.session?.stop();
+    this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    this.agentRt.get(id)?.terminal?.dispose();
     void removeScreens(id);
+    void fs.rm(terminalFile(id), { force: true }).catch(() => undefined);
     for (const q of this.state.qa) {
       if (q.qaAgentId === id && q.status === 'testing') this.setQa(q, { status: 'queued', qaAgentId: null });
       if (q.devAgentId === id) q.devAgentId = null;
@@ -1330,6 +1371,7 @@ export class Swarm {
       if (q.qaAgentId === id && q.status === 'testing') this.setQa(q, { status: 'queued', qaAgentId: null });
       if (q.devAgentId === id && q.status === 'fixing') this.setQa(q, { status: 'failed' });
     }
+    this.agentRt.get(id)?.terminal?.releaseIdle?.();
     this.clearTask(a);
     this.appendLog(a, [{ kind: 'system', text: '↺ Cleared desk. Ready for new work.' }]);
     this.save();
@@ -1368,6 +1410,66 @@ export class Swarm {
 
   private linkedRepos(repo: PersistedRepo) {
     return repo.links.map((id) => this.state.repos.find((r) => r.id === id)).filter((r): r is PersistedRepo => !!r);
+  }
+
+  /**
+   * How an agent's next session runs: the CLI in their terminal (the terminal runtime), or Claude Code through the
+   * SDK. A session can only be resumed by the CLI that made it, so a follow-up stays with that CLI.
+   */
+  private sessionRuntime(a: PersistedAgent, resume?: string): { terminal?: AgentTerminal; cli?: AgentCli; label?: string; resumeSessionId?: string } {
+    const inTerminal = this.state.settings.runtime === 'terminal' && this.backend.terminals;
+    let cli: AgentCli = a.role === 'ceo' ? 'claude' : a.cli || this.state.settings.defaultCli;
+    if (resume && a.sessionCli && a.sessionCli !== cli) {
+      if (inTerminal) cli = a.sessionCli;
+      else if (a.sessionCli !== 'claude') resume = undefined;
+    }
+    if (!inTerminal) return { resumeSessionId: resume };
+    const what = a.role === 'ceo' ? a.issueTitle : a.task === 'qa' ? `QA · PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : a.issueNumber ? `#${a.issueNumber} ${a.issueTitle ?? ''}` : null;
+    return { terminal: this.terminalFor(a), cli, label: `${a.name}${what ? ` · ${what}` : ''}`.slice(0, 80).trim(), resumeSessionId: resume };
+  }
+
+  /** The model to ask for (the Agent SDK runs Claude Code). '' lets another coding agent use its own default. */
+  private modelFor(a: PersistedAgent, cli: AgentCli | undefined) {
+    return effectiveModel(a.model, cli ?? 'claude', this.state.settings, DEFAULT_MODEL);
+  }
+
+  // ---------- terminals ----------
+
+  private async loadTerminal(agentId: string): Promise<AgentTerminal | null> {
+    if (!(await fs.stat(terminalFile(agentId)).catch(() => null))) return null;
+    const t = this.newTerminal(agentId);
+    await t.load(terminalFile(agentId));
+    return t;
+  }
+
+  /** The agent's terminal, made the first time they run in the terminal runtime. */
+  private terminalFor(a: PersistedAgent): AgentTerminal {
+    const rt = this.agentRt.get(a.id)!;
+    rt.terminal ??= this.newTerminal(a.id);
+    return rt.terminal;
+  }
+
+  private newTerminal(agentId: string) {
+    const t = new AgentTerminal();
+    // Typed at a CLI waiting at its prompt after its task: a follow-up, which starts synchronously when it can.
+    t.onIdlePrompt = (text) => {
+      void this.message(agentId, text, true).catch(() => undefined);
+      return !!this.agentRt.get(agentId)?.session;
+    };
+    return t;
+  }
+
+  private async saveTerminals(all = false) {
+    for (const [id, rt] of this.agentRt) {
+      if (rt.terminal && (all || rt.terminal.dirty)) await rt.terminal.save(terminalFile(id)).catch((err) => console.warn('could not save a terminal', err));
+    }
+  }
+
+  /** A browser opened an agent's terminal (/ws/term?agent=<id>). */
+  attachTerminal(agentId: string, ws: WebSocket) {
+    const t = this.agentRt.get(agentId)?.terminal;
+    if (!t) return ws.close(4404, 'That agent has no terminal');
+    t.attach(ws);
   }
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
@@ -1481,23 +1583,27 @@ export class Swarm {
     systemAppend: string,
     resumeSessionId?: string,
     outputSchema?: Record<string, unknown>,
+    typed = false,
   ) {
     const rt = this.agentRt.get(a.id)!;
     a.status = 'working';
+    const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
     rt.session = this.backend.startSession(
       {
         cwd,
         prompt,
         systemAppend,
-        model: a.model || this.state.settings.defaultModel,
+        model: this.modelFor(a, how.cli),
         effort: a.effort || this.state.settings.defaultEffort,
         browserTesting: repo.browserTesting,
-        permissionMode: this.state.settings.permissionMode,
         additionalDirectories: this.linkedRepos(repo).map((r) => this.backend.mainDir(r.fullName)),
         role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
         outputSchema,
-        resumeSessionId,
+        // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.
+        keepAlive: a.task !== 'qa',
+        typed,
+        ...how,
       },
       {
         log: (entries) => this.appendLog(a, entries),
@@ -1508,6 +1614,7 @@ export class Swarm {
         },
         sessionId: (id) => {
           a.sessionId = id;
+          a.sessionCli = how.cli ?? 'claude';
         },
         browserUrl: (url) => {
           rt.browserUrl = url;
@@ -1528,7 +1635,6 @@ export class Swarm {
         usageWarning: (info) => this.paceForWarning(info),
         finished: (result) => void this.onFinished(a, repo, result),
       },
-      repo.defaultBranch,
     );
   }
 
@@ -1691,7 +1797,7 @@ export class Swarm {
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
       repo.browserTesting
-        ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
+        ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
         : '4. Exercise the changed behaviour directly (run the program, call the API, write a quick script).',
       '5. You may write throwaway scripts to probe behaviour, but do not commit them.',
       '',
@@ -1950,7 +2056,8 @@ export class Swarm {
     }
   }
 
-  async message(id: string, text: string) {
+  /** A message for an agent: sent into their running session, or a follow-up that resumes it. typed: the manager typed it at their CLI's prompt, where it's already running. */
+  async message(id: string, text: string, typed = false) {
     const a = this.agent(id);
     if (a.role === 'ceo') return this.messageCeo(text);
     const repo = this.repo(a.repoId);
@@ -1958,7 +2065,7 @@ export class Swarm {
     const rt = this.agentRt.get(id)!;
     if (rt.session) {
       this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${text}` }]);
-      rt.session.send(text);
+      if (!typed) rt.session.send(text);
       return;
     }
     if (a.role === 'qa') throw new HttpError(409, `${a.name} isn't testing anything right now. Send a PR to QA from the Kanban board.`);
@@ -1971,15 +2078,20 @@ export class Swarm {
     a.startedAt = Date.now();
     if (a.task === null) a.task = 'issue';
     const fixing = a.task === 'fix' && a.prNumber ? { pr: a.prNumber, headRef: a.branch } : undefined;
-    this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId);
+    this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed);
   }
 
   updateSettings(patch: Partial<SwarmSettings>) {
     const s = this.state.settings;
     if (patch.sessionLimit !== undefined) s.sessionLimit = Math.max(0, Math.round(Number(patch.sessionLimit)) || 0);
-    if (patch.defaultModel !== undefined) s.defaultModel = String(patch.defaultModel).trim() || DEFAULT_MODEL;
+    // The default model belongs to the default coding agent: a new agent starts on its own default.
+    if (isCli(patch.defaultCli) && patch.defaultCli !== s.defaultCli) {
+      s.defaultCli = patch.defaultCli;
+      if (patch.defaultModel === undefined) s.defaultModel = s.defaultCli === 'claude' ? DEFAULT_MODEL : '';
+    }
+    if (patch.defaultModel !== undefined) s.defaultModel = String(patch.defaultModel).trim() || (s.defaultCli === 'claude' ? DEFAULT_MODEL : '');
     if (patch.defaultEffort !== undefined && EFFORTS.includes(patch.defaultEffort)) s.defaultEffort = patch.defaultEffort;
-    if (patch.permissionMode === 'guarded' || patch.permissionMode === 'bypass') s.permissionMode = patch.permissionMode;
+    if (patch.runtime === 'terminal' || patch.runtime === 'sdk') s.runtime = patch.runtime;
     if (patch.hiring === 'approve' || patch.hiring === 'auto') s.hiring = patch.hiring;
     if (patch.teamCap !== undefined) s.teamCap = Math.max(1, Math.min(15, Math.round(Number(patch.teamCap)) || 1));
     if (patch.ceoHeartbeatMin !== undefined) s.ceoHeartbeatMin = Math.max(0, Math.min(1440, Math.round(Number(patch.ceoHeartbeatMin)) || 0));
@@ -2366,6 +2478,7 @@ export class Swarm {
         skin: pick(SKIN),
         model: CEO_MODEL,
         effort: CEO_EFFORT,
+        cli: 'claude',
         status: 'idle',
         issueNumber: null,
         issueTitle: null,
@@ -2377,11 +2490,12 @@ export class Swarm {
         costUsd: 0,
         turns: 0,
         sessionId: null,
+        sessionCli: null,
         lastError: null,
         logTail: [],
       };
       this.state.agents.push(a);
-      this.agentRt.set(a.id, { log: [], pending: [], session: null, currentTool: null, browserUrl: null, screenshot: null, shots: [] });
+      this.agentRt.set(a.id, { log: [], pending: [], session: null, currentTool: null, browserUrl: null, screenshot: null, shots: [], terminal: null });
       this.appendLog(a, [{ kind: 'system', text: `🏛️ ${a.name} moved into the corner office. The CEO studies every floor, shapes its team and plans its work.` }]);
     }
     const i = interrupted.indexOf(a);
@@ -2485,6 +2599,8 @@ export class Swarm {
       return;
     }
     const s = this.state.settings;
+    // A chat carries on from the CEO's last session, so "why did you propose that?" has an answer.
+    const how = this.sessionRuntime(a, job.kind === 'chat' ? (a.sessionId ?? undefined) : undefined);
     rt.session = this.backend.startSession(
       {
         cwd: CEO_DIR,
@@ -2501,12 +2617,10 @@ export class Swarm {
         model: a.model || CEO_MODEL,
         effort: a.effort || CEO_EFFORT,
         browserTesting: false,
-        permissionMode: s.permissionMode,
         additionalDirectories: this.state.repos.filter((r) => this.repoRt.get(r.id)?.cloneStatus === 'ready').map((r) => this.backend.mainDir(r.fullName)),
         role: 'ceo',
         office: this.officeTools(),
-        // A chat carries on from the CEO's last session, so "why did you propose that?" has an answer.
-        resumeSessionId: job.kind === 'chat' ? (a.sessionId ?? undefined) : undefined,
+        ...how,
       },
       {
         log: (entries) => this.appendLog(a, entries),
@@ -2517,6 +2631,7 @@ export class Swarm {
         },
         sessionId: (id) => {
           a.sessionId = id;
+          a.sessionCli = 'claude';
         },
         browserUrl: () => undefined,
         screenshot: () => undefined,
@@ -2525,7 +2640,6 @@ export class Swarm {
         usageWarning: (info) => this.paceForWarning(info),
         finished: (result) => this.onCeoFinished(a, result),
       },
-      '',
     );
   }
 
@@ -2843,7 +2957,8 @@ export class Swarm {
         doing: this.agentDoing(a),
         issue: a.issueNumber ? { number: a.issueNumber, title: a.issueTitle } : null,
         pullRequest: a.prNumber ? { number: a.prNumber, url: a.prUrl } : null,
-        model: a.model || (ceo ? CEO_MODEL : this.state.settings.defaultModel),
+        codingAgent: ceo ? 'claude' : a.cli || this.state.settings.defaultCli,
+        model: ceo ? a.model || CEO_MODEL : this.modelFor(a, a.cli || this.state.settings.defaultCli) || 'the coding agent default',
         effort: a.effort || (ceo ? CEO_EFFORT : this.state.settings.defaultEffort),
         hiredBy: a.hiredBy,
         jobDescription: a.brief || null,

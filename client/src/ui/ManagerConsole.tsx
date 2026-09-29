@@ -2,10 +2,12 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import { api } from '../api';
 import { PreviewPill, PreviewSettings } from './AppViewer';
 import { agentsOnRepo, pendingRequests, useStore, type ManagerTab } from '../store';
-import { CEO_ID, type EffortLevel, type OfficeUpdateView, type RepoView } from '../../../shared/types';
+import { CEO_ID, type AgentCli, type CliView, type EffortLevel, type OfficeUpdateView, type RepoView } from '../../../shared/types';
+import { effectiveModel } from '../../../shared/models';
 import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../officeUpdate';
 import { confirmDialog } from './Confirm';
 import { IssueForm } from './KanbanView';
+import { LiveTerminal } from './LiveTerminal';
 import { Panel } from './Overlays';
 import { Resume } from './Phone';
 import { ProjectPicker } from './ProjectPicker';
@@ -13,6 +15,22 @@ import { StatusPill } from './TerminalView';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+const cliName = (clis: CliView[], id: AgentCli) => clis.find((c) => c.id === id)?.label ?? id;
+
+/** The coding agents to pick from, installed ones first, each saying if it's missing on this machine. */
+function CliOptions({ clis }: { clis: CliView[] }) {
+  return (
+    <>
+      {[...clis].sort((a, b) => Number(b.installed) - Number(a.installed)).map((c) => (
+        <option key={c.id} value={c.id} disabled={!c.installed}>
+          {c.label}
+          {c.installed ? '' : ' (not installed)'}
+        </option>
+      ))}
+    </>
+  );
+}
 
 async function attempt<T>(fn: () => Promise<T>): Promise<T | undefined> {
   try {
@@ -308,14 +326,18 @@ function CeoTab() {
           <div className="muted small">
             {info.nextReviewAt ? `Next company review around ${new Date(info.nextReviewAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (skipped if nothing changed).` : 'Periodic reviews are off (Settings).'}
           </div>
-          <div className="term ceo-term" ref={scroller}>
-            {log.length === 0 && <div className="term-line term-system">(nothing yet)</div>}
-            {log.map((l) => (
-              <div key={l.id} className={`term-line term-${l.kind}`}>
-                {l.text || ' '}
-              </div>
-            ))}
-          </div>
+          {ceo.terminal ? (
+            <LiveTerminal agentId={ceo.id} className="ceo-term" />
+          ) : (
+            <div className="term ceo-term" ref={scroller}>
+              {log.length === 0 && <div className="term-line term-system">(nothing yet)</div>}
+              {log.map((l) => (
+                <div key={l.id} className={`term-line term-${l.kind}`}>
+                  {l.text || ' '}
+                </div>
+              ))}
+            </div>
+          )}
           <form
             className="row"
             onSubmit={(e) => {
@@ -376,7 +398,11 @@ function TeamTab() {
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
   const settings = useStore((s) => s.settings);
+  const clis = useStore((s) => s.clis);
   const openOverlay = useStore((s) => s.openOverlay);
+  const terminal = settings.runtime === 'terminal';
+  // The Agent SDK runtime is Claude Code for everyone.
+  const workerCli = (a: { cli: AgentCli | '' }): AgentCli => (terminal ? a.cli || settings.defaultCli : 'claude');
   const [names, setNames] = useState<Record<string, string>>({});
   const [openBrief, setOpenBrief] = useState<string | null>(null);
   if (repos.length === 0) return <p className="muted">Connect a repo first; agents need a floor to sit on.</p>;
@@ -458,35 +484,41 @@ function TeamTab() {
                       />
                     </td>
                     <td>
-                      <button className="btn btn-small btn-ghost" title="Job description" onClick={() => setOpenBrief(openBrief === a.id ? null : a.id)}>
+                      <button className="btn btn-small btn-ghost" title="Job description and look" onClick={() => setOpenBrief(openBrief === a.id ? null : a.id)}>
                         📝{a.brief ? '' : ' +'}
                       </button>
-                    </td>
-                    <td>
-                      <select
-                        value={a.look}
-                        title="Character look"
-                        onChange={(e) => void attempt(() => api.updateAgent(a.id, { look: e.target.value as 'feminine' | 'masculine' }))}
-                      >
-                        <option value="feminine">👩 She</option>
-                        <option value="masculine">👨 He</option>
-                      </select>
                     </td>
                     <td>
                       <StatusPill status={a.status} />
                     </td>
                     <td className="small">{a.status === 'idle' ? <span className="muted">—</span> : a.task === 'qa' ? `testing PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : `#${a.issueNumber ?? ''} ${a.issueTitle ?? ''}`.slice(0, 40)}</td>
+                    {terminal && (
+                      <td>
+                        <select
+                          value={a.cli}
+                          title="Their coding agent"
+                          style={{ width: 112 }}
+                          onChange={(e) => void attempt(() => api.updateAgent(a.id, { cli: e.target.value as AgentCli | '' }))}
+                        >
+                          <option value="">{cliName(clis, settings.defaultCli)} (default)</option>
+                          <CliOptions clis={clis} />
+                        </select>
+                      </td>
+                    )}
                     <td>
                       <input
+                        key={`m-${a.model}-${workerCli(a)}`}
                         className="inline"
-                        list="models"
+                        style={{ minWidth: 110 }}
+                        list={workerCli(a) === 'claude' ? 'models' : undefined}
                         defaultValue={a.model}
-                        placeholder={settings.defaultModel}
+                        placeholder={effectiveModel('', workerCli(a), settings, MODELS[0]) || 'agent default'}
+                        title="Their model ('' = the default for their coding agent)"
                         onBlur={(e) => e.target.value !== a.model && void attempt(() => api.updateAgent(a.id, { model: e.target.value }))}
                       />
                     </td>
                     <td>
-                      <select value={a.effort} onChange={(e) => void attempt(() => api.updateAgent(a.id, { effort: e.target.value }))}>
+                      <select value={a.effort} title="Their effort" style={{ width: 124 }} onChange={(e) => void attempt(() => api.updateAgent(a.id, { effort: e.target.value }))}>
                         <option value="">default ({settings.defaultEffort})</option>
                         {EFFORTS.map((x) => (
                           <option key={x} value={x}>
@@ -514,7 +546,19 @@ function TeamTab() {
                   {openBrief === a.id && (
                     <tr>
                       <td />
-                      <td colSpan={11}>
+                      <td colSpan={terminal ? 11 : 10}>
+                        <label className="row small">
+                          <span>Drawn as</span>
+                          <select
+                            value={a.look}
+                            title="Character look"
+                            style={{ width: 'auto' }}
+                            onChange={(e) => void attempt(() => api.updateAgent(a.id, { look: e.target.value as 'feminine' | 'masculine' }))}
+                          >
+                            <option value="feminine">👩 She</option>
+                            <option value="masculine">👨 He</option>
+                          </select>
+                        </label>
                         <textarea
                           key={`b-${a.brief}`}
                           rows={3}
@@ -603,17 +647,34 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
 
 function SettingsTab() {
   const settings = useStore((s) => s.settings);
+  const clis = useStore((s) => s.clis);
   const user = useStore((s) => s.user);
   const workspaceRoot = useStore((s) => s.workspaceRoot);
   const demo = useStore((s) => s.demo);
   const set = (p: Parameters<typeof api.updateSettings>[0]) => void attempt(() => api.updateSettings(p));
+  const terminal = settings.runtime === 'terminal';
+  const defaultCli = terminal ? settings.defaultCli : 'claude';
   return (
     <div className="tab-grid">
       <div className="card">
         <h3>🧠 Agents</h3>
+        {terminal && (
+          <label className="field">
+            <span>Default coding agent</span>
+            <select value={settings.defaultCli} onChange={(e) => set({ defaultCli: e.target.value as AgentCli })}>
+              <CliOptions clis={clis} />
+            </select>
+          </label>
+        )}
         <label className="field">
-          <span>Default model</span>
-          <input list="models-s" defaultValue={settings.defaultModel} onBlur={(e) => e.target.value !== settings.defaultModel && set({ defaultModel: e.target.value })} />
+          <span>Default model{terminal ? ` for ${cliName(clis, settings.defaultCli)}` : ''}</span>
+          <input
+            key={`${settings.defaultCli}:${settings.defaultModel}`}
+            list={defaultCli === 'claude' ? 'models-s' : undefined}
+            defaultValue={settings.defaultModel}
+            placeholder="the agent's own default"
+            onBlur={(e) => e.target.value !== settings.defaultModel && set({ defaultModel: e.target.value })}
+          />
           <datalist id="models-s">
             {MODELS.map((m) => (
               <option key={m} value={m} />
@@ -630,13 +691,18 @@ function SettingsTab() {
             ))}
           </select>
         </label>
+        <p className="muted small">
+          {terminal
+            ? 'Each worker can use their own coding agent, model and effort (Team tab); the CEO always runs Claude Code. Claude Code reports every step; Codex and OpenCode are experimental: the office sees their task rather than each step.'
+            : 'The Agent SDK runs Claude Code. Each worker can use their own model and effort (Team tab).'}
+        </p>
         <label className="field">
           <span>Session limit</span>
           <input type="number" min={0} placeholder="No limit" defaultValue={settings.sessionLimit || ''} onBlur={(e) => set({ sessionLimit: Number(e.target.value) || 0 })} />
         </label>
         <p className="muted small">
-          Leave empty so every agent with work runs at once. They all share your Claude subscription's usage limits, and each one is its own Claude Code process on this PC, so set a limit if you hit
-          either.
+          Leave empty so every agent with work runs at once. Agents on the same coding agent share its subscription's usage limits, and each one is its own process on this PC, so set a limit if
+          you hit either.
         </p>
         <label className="field">
           <span>Sessions while pacing</span>
@@ -674,19 +740,23 @@ function SettingsTab() {
         <p className="muted small">A review is skipped when nothing changed since the last one. The CEO's own model and effort are on the CEO tab.</p>
       </div>
       <div className="card">
-        <h3>🛡️ Permissions</h3>
+        <h3>⌨️ How agents run</h3>
         <label className="toggle block">
-          <input type="radio" checked={settings.permissionMode === 'guarded'} onChange={() => set({ permissionMode: 'guarded' })} />
+          <input type="radio" checked={settings.runtime === 'terminal'} onChange={() => set({ runtime: 'terminal' })} />
           <span>
-            <b>Guarded</b> (recommended): edits are auto-approved inside the agent's worktree. Writes elsewhere, force-pushes, pushes to the default branch, merging PRs and repo admin commands are refused.
+            <b>Real terminals</b> (recommended): every agent is its actual coding agent running in its own terminal. Open a desk to watch it live or type into it.
           </span>
         </label>
         <label className="toggle block">
-          <input type="radio" checked={settings.permissionMode === 'bypass'} onChange={() => set({ permissionMode: 'bypass' })} />
+          <input type="radio" checked={settings.runtime === 'sdk'} onChange={() => set({ runtime: 'sdk' })} />
           <span>
-            <b>Bypass</b>: no permission checks at all. Only use this in a disposable VM or container.
+            <b>Agent SDK</b>: Claude Code through the Claude Agent SDK, shown as a log of its steps. Claude Code only.
           </span>
         </label>
+        <p className="muted small">
+          Agents work like your own coding agents in a terminal, with your skills, MCP servers and settings, and don't stop to ask. The office's workflow (branches, pull requests, QA reporting
+          back) is in their instructions.
+        </p>
         <h3>🏢 Company</h3>
         <label className="field">
           <span>Your name</span>

@@ -1,11 +1,11 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type CeoInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { blockers } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
 
-export type PhoneTab = 'chat' | 'hires' | 'company';
+export type PhoneTab = 'chat' | 'hires' | 'company' | 'games';
 
 export type Overlay =
   | { kind: 'terminal'; agentId: string }
@@ -45,6 +45,7 @@ interface State {
   demo: boolean;
   workspaceRoot: string;
   settings: SwarmSettings;
+  clis: CliView[]; // the coding-agent CLIs installed where the office runs
   repos: RepoView[];
   agents: Record<string, Agent>;
   logs: Record<string, LogLine[]>;
@@ -129,7 +130,8 @@ export const useStore = create<State>((set, get) => ({
     sessionLimit: 0,
     defaultModel: 'claude-opus-5-5',
     defaultEffort: 'medium',
-    permissionMode: 'guarded',
+    runtime: 'terminal',
+    defaultCli: 'claude',
     hiring: 'approve',
     teamCap: 6,
     ceoHeartbeatMin: 60,
@@ -140,6 +142,7 @@ export const useStore = create<State>((set, get) => ({
     tutorialStep: -1,
     pacingSessions: 3,
   },
+  clis: [],
   repos: [],
   agents: {},
   logs: {},
@@ -201,6 +204,7 @@ export const useStore = create<State>((set, get) => ({
           officeCommit: d.officeCommit,
           officeUpdate: d.officeUpdate,
           usage: d.usage,
+          clis: d.clis ?? [],
           restarting: false,
           floor: floorExists ? get().floor : 0,
         });
@@ -262,6 +266,9 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'settings':
         set({ settings: ev.settings });
+        break;
+      case 'clis':
+        set({ clis: ev.clis });
         break;
       case 'request': {
         const prev = get().requests.find((r) => r.id === ev.request.id);

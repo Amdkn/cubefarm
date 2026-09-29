@@ -29,8 +29,10 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
   updates its own folder (git fetch + merge, npm install, build) when the office or you ask for it (`u`). Run it
   only in a throwaway clone outside the live office, with `--demo` and your `SWARM_HOME`, `SWARM_PORT` and
   `SWARM_CLIENT_PORT`.
-- Guardrails never loosen: guarded mode refuses writes outside the worktree, force-pushes, pushes to the default
-  branch and `gh pr merge`; `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
+- Agents are ordinary coding-agent CLI sessions on the manager's own setup, unsandboxed, by the manager's choice. The
+  office's workflow rules (no pushes to the default branch, no merging, QA leaves GitHub alone) live in their prompts
+  and instructions, not in enforcement: don't add hooks, permission rules or sandboxes that refuse tool calls.
+  `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
 ## Scripts
 
@@ -51,16 +53,25 @@ before you open a PR.
 ## Code map
 
 Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bundles it into `dist-server/` for npm):
-- `index.ts`: entry; picks the real or demo backend, REST routes under `/api`, the `/ws` websocket, serves `dist/`, shutdown.
+- `index.ts`: entry; picks the real or demo backend, REST routes under `/api`, the `/ws` and `/ws/term` websockets, serves `dist/`, shutdown.
 - `config.ts`: `SWARM_PORT` (default 4317), `SWARM_HOME` (default `~/.cubefarm`), `--demo`, state file, intervals,
   the default projects folder.
 - `swarm.ts`: the orchestrator. Floors, agents, scheduling/auto-assign, dev → QA → fix → merge loop, dev and QA
   prompts, CEO job queue, phone messages, persistence (`state.json` / `demo-state.json`), websocket fan-out.
-- `agentRunner.ts`: one Agent SDK session; options, guarded permission checks, env stripping, Playwright MCP,
-  and turning the SDK stream into terminal lines.
+- `agentRunner.ts`: one Agent SDK session; options, env stripping, Playwright MCP, and turning the SDK stream into
+  terminal lines.
+- `cliRunner.ts`: the terminal runtime (the default): one agent as the real CLI in a node-pty, same session contract
+  as `agentRunner.ts`. Claude Code reports through HTTP hooks (`POST /api/hooks/:token`; PreToolUse approves every
+  call); Codex/OpenCode only report turn endings, and their screenshots are collected from the session's Playwright
+  output folder. The CEO's office tools are served over MCP (`/api/mcp/:token`).
+  A developer's CLI stays at its prompt after the task (`keepAlive`): follow-ups and prompts typed there reuse it.
+- `clis.ts`: the CLIs (Claude Code from the SDK's bundled binary, Codex, OpenCode): detection, Windows `.cmd` shim
+  unwrapping, each one's command line, and the helper scripts they call back with.
+- `terminal.ts`: `AgentTerminal`, a headless xterm mirror per agent (replay for late viewers, saved to disk), its
+  `/ws/term` viewers, and keystrokes/resizes to the running CLI.
 - `ceo.ts`: the CEO's office MCP tools (`createOfficeTools`, zod-validated), `ceoSystemPrompt`, `ceoJobPrompt`.
 - `backend.ts`: the `Backend` interface (everything touching GitHub, git, disk and sessions) and `realBackend`.
-- `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions, fake previews for `--demo`.
+- `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions (drawn into the agent's terminal in the terminal runtime), fake previews for `--demo`.
 - `github.ts`: all GitHub access through the `gh` CLI.
 - `workspace.ts`: floor checkouts, per-agent worktrees (`<SWARM_HOME>/workspaces/<owner>__<repo>/desks/<agent>`),
   fast-forwarding main, per-repo git lock, stopping processes an agent left running.
@@ -86,7 +97,9 @@ Shared (`shared/`, imported by both sides):
 Client (`client/`, Vite root; React 19, R3F, drei, zustand):
 - `src/world/`: the 3D building: floors, desks, characters (`appearance.ts`, `characterParts.ts`), elevator,
   whiteboard, player movement and collisions (`layout.ts`), canvas textures (`draw.ts`), `toys/` (Rapier physics).
-- `src/ui/`: HTML overlays: HUD, terminal, Kanban, manager's console, phone, elevator panel, app viewer, sounds (`sfx.ts`).
+- `src/ui/`: HTML overlays: HUD, terminal (`LiveTerminal.tsx`: xterm.js on `/ws/term`), Kanban, manager's console,
+  phone (with its mini-games in `games/`: pure logic in `tetris.ts` / `snake.ts` / `pet.ts`), elevator panel, app
+  viewer, sounds (`sfx.ts`).
 - `src/store.ts`: the zustand store; `apply(ServerEvent)` folds websocket events into UI state.
 - `src/api.ts`: REST calls; errors become toasts.
 - `src/net.ts`: the websocket connection with reconnect. `src/perf.tsx`: render pausing, adaptive DPR, `?stats`.

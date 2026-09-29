@@ -1,5 +1,5 @@
 import { useStore } from './store';
-import type { GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
+import type { AgentCli, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -64,7 +64,7 @@ export const api = {
   sendToQa: (repoId: string, n: number) => call('POST', `${r(repoId)}/pulls/${n}/qa`),
   hireAgent: (repoId: string, opts: { name?: string; model?: string; effort?: string; role?: 'dev' | 'qa'; title?: string; specialty?: string } = {}) =>
     call('POST', `${r(repoId)}/agents`, opts),
-  updateAgent: (id: string, patch: { name?: string; model?: string; effort?: string; look?: 'feminine' | 'masculine'; title?: string; specialty?: string; brief?: string }) =>
+  updateAgent: (id: string, patch: { name?: string; model?: string; effort?: string; cli?: AgentCli | ''; look?: 'feminine' | 'masculine'; title?: string; specialty?: string; brief?: string }) =>
     call('PATCH', `/api/agents/${id}`, patch),
   fireAgent: (id: string) => call('DELETE', `/api/agents/${id}`),
   assign: (id: string, issueNumber: number, note?: string) => call('POST', `/api/agents/${id}/assign`, { issueNumber, note }),

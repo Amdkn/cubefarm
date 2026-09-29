@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Backend } from './backend.ts';
 import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
+import { CLIS } from './clis.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
@@ -169,7 +170,7 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
   const round = Number(opts.prompt.match(/QA round (\d+)/)?.[1] ?? 1);
 
   const header: Step = [
-    { kind: 'system', text: `✻ Claude Code (demo) · ${opts.model} · ${opts.effort} effort · ${opts.permissionMode}` },
+    { kind: 'system', text: `✻ Claude Code (demo) · ${opts.model} · ${opts.effort} effort` },
     { kind: 'system', text: `  cwd ${opts.cwd}` },
   ];
   const body = kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number) : devScript(opts, cb, number, title);
@@ -285,6 +286,78 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       cb.finished({ ok: false, text: '', costUsd: 0.1, turns: i, errors: ['Stopped by manager'] });
     },
   };
+}
+
+// ---------- the terminal runtime ----------
+
+const ANSI: Record<LogEntry['kind'], (text: string) => string> = {
+  text: (t) => t.replace(/^● /, '\x1b[97m●\x1b[0m '),
+  tool: (t) => `\x1b[32m●\x1b[0m \x1b[1m${t.replace(/^⏺ /, '')}\x1b[0m`,
+  result: (t) => `\x1b[2m${t}\x1b[0m`,
+  thinking: (t) => `\x1b[35m${t}\x1b[0m`,
+  error: (t) => `\x1b[31m${t}\x1b[0m`,
+  system: (t) => `\x1b[2m${t}\x1b[0m`,
+  manager: (t) => `\x1b[36m${t.replace(/^▶ /, '❯ ')}\x1b[0m`,
+  done: (t) => `\x1b[32m${t}\x1b[0m`,
+};
+
+/**
+ * With a terminal (the terminal runtime), the fake session's lines are drawn there the way Claude Code draws them,
+ * and what the manager types into it is taken as a message.
+ */
+function inTerminal(opts: SessionOptions, cb: SessionCallbacks, start: (cb: SessionCallbacks) => SessionHandle): SessionHandle {
+  const term = opts.terminal;
+  if (!term) return start(cb);
+  const name = CLIS.find((c) => c.id === (opts.cli ?? 'claude'))?.label ?? 'Claude Code';
+  term.note(`── ${name}${opts.label ? ` · ${opts.label}` : ''} ──`);
+  term.write(
+    [
+      '',
+      ` \x1b[38;5;209m▐▛███▜▌\x1b[0m   \x1b[1m${name}\x1b[0m (demo)`,
+      `\x1b[38;5;209m▝▜█████▛▘\x1b[0m  ${opts.model || 'default model'} · ${opts.effort} effort`,
+      `\x1b[38;5;209m  ▘▘ ▝▝\x1b[0m    \x1b[2m${opts.cwd}\x1b[0m`,
+      '',
+      `\x1b[36m❯\x1b[0m ${opts.prompt.split('\n')[0].slice(0, 200)}`,
+      '',
+    ].join('\r\n'),
+  );
+  let handle: SessionHandle | null = null;
+  let line = '';
+  term.bind({
+    write: (data) => {
+      for (const ch of data.replace(/\x1b\[[0-9;?]*[A-Za-z~]|\x1b./g, '')) {
+        if (ch === '\r') {
+          const text = line.trim();
+          line = '';
+          term.write('\r\n');
+          if (text && handle) {
+            cb.log([{ kind: 'manager', text: `▶ Typed in the terminal: ${text}` }]);
+            handle.send(text);
+          }
+        } else if (ch === '\x7f' || ch === '\b') {
+          if (line) term.write('\b \b');
+          line = line.slice(0, -1);
+        } else if (ch >= ' ') {
+          line += ch;
+          term.write(ch);
+        }
+      }
+    },
+    resize: () => undefined,
+  });
+  handle = start({
+    ...cb,
+    log: (entries) => {
+      cb.log(entries);
+      for (const e of entries) term.write(`${e.kind === 'tool' || (e.kind === 'text' && e.text.startsWith('●')) ? '\r\n' : ''}${ANSI[e.kind](e.text)}\r\n`);
+    },
+    finished: (r) => {
+      term.bind(null);
+      term.note(`── ${name} session ended ──`);
+      cb.finished(r);
+    },
+  });
+  return handle;
 }
 
 // Claude's usage warning, faked once so the office can be seen pacing new work: the 4th session gets it, and the
@@ -430,8 +503,11 @@ export function createDemoBackend(): Backend {
     releaseDesk: async () => undefined,
     startSession: (opts, cb) => {
       if (++sessionsStarted === USAGE_WARNING_AT) fakeUsageWarning(cb);
-      return opts.role === 'ceo' ? ceoSession(opts, cb) : fakeSession(opts, cb, deskRepo.get(opts.cwd) ?? [...repos.keys()][0]);
+      return inTerminal(opts, cb, (c) => (opts.role === 'ceo' ? ceoSession(opts, c) : fakeSession(opts, c, deskRepo.get(opts.cwd) ?? [...repos.keys()][0])));
     },
+    terminals: true,
+    detectClis: async () =>
+      CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated })),
     previews: demoPreviews,
     office: demoOffice,
   };

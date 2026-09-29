@@ -2,17 +2,26 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
+import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { DEMO, PORT, STATE_FILE, WORKSPACE_ROOT } from './config.ts';
 import { realBackend } from './backend.ts';
+import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
 import { underLauncher } from './officeUpdate.ts';
 import { HttpError, Swarm } from './swarm.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
+// Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
+if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
 await swarm.init();
 
 const app = express();
+// Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
+// The token in the path is the session's; unknown tokens get an empty answer.
+app.post('/api/hooks/:token', express.json({ limit: '64mb' }), (req, res) => void res.json(handleHook(String(req.params.token), req.body)));
+app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => void handleMcp(String(req.params.token), req, res).catch(next));
+app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
 app.use(express.json({ limit: '1mb' }));
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
@@ -166,10 +175,20 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+// Two sockets: /ws carries the office's state to every tab, /ws/term?agent=<id> one agent's terminal to whoever opened it.
+const wss = new WebSocketServer({ noServer: true });
+const terms = new WebSocketServer({ noServer: true });
 wss.on('connection', (ws) => swarm.addClient(ws));
+terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
+server.on('upgrade', (req, socket, head) => {
+  const { pathname } = new URL(req.url ?? '', 'http://localhost');
+  const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
+  if (!target) return void socket.destroy();
+  target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
+});
 
 server.listen(PORT, '127.0.0.1', () => {
+  setOfficeUrl(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
   console.log(`\n  🏢 cubefarm on http://localhost:${PORT}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
   console.log(`     state: ${STATE_FILE}`);
   console.log(`     workspaces: ${WORKSPACE_ROOT}\n`);

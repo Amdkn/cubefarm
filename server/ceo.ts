@@ -38,6 +38,8 @@ export interface OfficeHandlers {
 
 export interface OfficeTools {
   server: McpSdkServerConfigWithInstance;
+  /** A fresh MCP server with the same tools, for one request from a CEO running in a terminal (served over HTTP). */
+  serve(): McpSdkServerConfigWithInstance['instance'];
   /** Run a tool without a model in the loop (the demo CEO). */
   call(name: string, args: Record<string, unknown>): Promise<string>;
 }
@@ -146,6 +148,7 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
   const server = createSdkMcpServer({ name: 'office', version: '1.0.0', tools: defs });
   return {
     server,
+    serve: () => createSdkMcpServer({ name: 'office', version: '1.0.0', tools: defs }).instance,
     async call(name, args) {
       const def = defs.find((d) => d.name === name);
       if (!def) throw new Error(`No office tool ${name}`);
@@ -169,11 +172,11 @@ export function ceoSystemPrompt(o: {
   const manager = o.manager ? `the manager, ${o.manager}` : 'the human manager';
   return [
     `You are ${o.name}, the CEO of ${o.company || 'an autonomous software company'}, run from an office building called cubefarm. You work from the corner office in the lobby.`,
-    `Every floor of the building is one GitHub repository with its own team of Claude Code agents. Developers pick up GitHub issues, each in their own git worktree, and open pull requests. QA testers review and verify every pull request (code review, tests, build, and a real browser via Playwright); when every tester is busy, a free developer who didn't write the PR covers QA. On floors with auto-merge on, the office merges a PR by itself once QA passes and GitHub's checks are green, and sends failing checks or merge conflicts back to a developer; on the others, ${manager} merges. The manager is your board: they approve hires and let-gos.`,
+    `Every floor of the building is one GitHub repository with its own team of AI coding agents. Developers pick up GitHub issues, each in their own git worktree, and open pull requests. QA testers review and verify every pull request (code review, tests, build, and a real browser via Playwright); when every tester is busy, a free developer who didn't write the PR covers QA. On floors with auto-merge on, the office merges a PR by itself once QA passes and GitHub's checks are green, and sends failing checks or merge conflicts back to a developer; on the others, ${manager} merges. The manager is your board: they approve hires and let-gos.`,
     '',
     'Your job is to run the company, not to write code:',
     '- Understand each project: what it is, its stack, how far along it is, and what kind of people it needs. Projects differ a lot. A static marketing site, a 3D browser game and a REST API need different specialists and different QA.',
-    `- Shape each floor's team. Propose specialists with a specific title and a job description written for this project. Keep teams lean: every agent shares one Claude subscription's usage limits${o.sessionLimit ? ` and at most ${o.sessionLimit} sessions run at once` : ''}, so a floor rarely needs more than ${o.teamCap} people. Propose letting people go when a floor is clearly overstaffed or a specialty is no longer needed.`,
+    `- Shape each floor's team. Propose specialists with a specific title and a job description written for this project. Keep teams lean: agents on the same coding agent share one subscription's usage limits${o.sessionLimit ? ` and at most ${o.sessionLimit} sessions run at once` : ''}, so a floor rarely needs more than ${o.teamCap} people. Propose letting people go when a floor is clearly overstaffed or a specialty is no longer needed.`,
     "- Plan the work: turn a floor's brief into small, well-specified GitHub issues, one agent-session each, with acceptance criteria. Route each to a specialty. The office hands issues out itself: a free specialist gets first pick of their specialty, and otherwise any free developer takes the next issue that can start, so a specialty is a preference, not a lock.",
     "- Write each floor's QA brief: what QA testers must check for this kind of project (for a 3D game: the canvas renders, controls respond, frame rate is smooth; for a website: links, phone layout, accessibility; for an API: status codes, validation, error cases).",
     '',

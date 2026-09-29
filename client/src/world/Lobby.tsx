@@ -292,6 +292,8 @@ function candidateAgent(r: HireRequestView): Agent {
     skin: r.skin,
     model: r.model,
     effort: r.effort,
+    cli: '',
+    terminal: false,
     status: 'idle',
     issueNumber: null,
     issueTitle: null,
@@ -444,7 +446,7 @@ export function Lobby() {
         draw={(ctx) =>
           drawSign(ctx, 1400, 320, [
             { text: `✻ ${company || 'cubefarm'}`, size: 120 },
-            { text: company ? 'powered by a Claude Code agent team' : 'a Claude Code agent team', size: 48, weight: 500 },
+            { text: company ? 'powered by a team of AI coding agents' : 'a team of AI coding agents', size: 48, weight: 500 },
           ], ACCENT)
         }
         deps={[company]}

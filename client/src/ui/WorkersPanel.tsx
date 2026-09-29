@@ -39,7 +39,9 @@ function ago(t: number, now: number) {
 function Row({ a, now }: { a: Agent; now: number }) {
   const openOverlay = useStore((s) => s.openOverlay);
   const log = useStore((s) => s.logs[a.id]);
-  const last = latest(log ?? []);
+  // CLIs that don't report each step (Codex, OpenCode…) have nothing new until their turn ends: show what they're on.
+  const found = latest(log ?? []);
+  const last = found && (!a.startedAt || found.t >= a.startedAt) ? found : null;
   const task = doing(a);
   return (
     <button className="wk-row" onClick={() => openOverlay({ kind: 'terminal', agentId: a.id })} title={`Watch ${a.name}'s screen`}>
@@ -51,7 +53,7 @@ function Row({ a, now }: { a: Agent; now: number }) {
         </span>
         <span className="wk-line">
           <span className={`wk-last wk-last-${last?.kind ?? 'none'}`} title={last?.text}>
-            {a.status === 'preparing' ? 'setting up the worktree…' : (last?.text ?? 'starting…')}
+            {a.status === 'preparing' ? 'setting up the worktree…' : (last?.text ?? (a.issueTitle ? `working on ${a.issueTitle}` : 'starting…'))}
           </span>
           {last && a.status !== 'preparing' && <span className="wk-ago">{ago(last.t, now)}</span>}
         </span>

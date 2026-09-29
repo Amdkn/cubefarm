@@ -132,7 +132,7 @@ function Help() {
         </p>
         <h3>Your phone</h3>
         <p>
-          Press <kbd>P</kbd> anywhere to pull out your phone. Text the CEO, approve or decline the people they want to hire, and see every project at a glance. The red badge counts decisions and messages waiting for you. In the chat, and in an agent's
+          Press <kbd>P</kbd> anywhere to pull out your phone. Text the CEO, approve or decline the people they want to hire, see every project at a glance, or play Cubetris, Cable Snake or look after your Desk Pet while the team works. The red badge counts decisions and messages waiting for you. In the chat, and in an agent's
           terminal, <kbd>Enter</kbd> sends and <kbd>Shift</kbd>+<kbd>Enter</kbd> starts a new line.
         </p>
         <h3>Who's working</h3>
@@ -147,7 +147,7 @@ function Help() {
         </p>
         <h3>Your team</h3>
         <p>
-          Each agent is its own Claude Code session (Claude Agent SDK) working in its own git worktree. Walk up behind them to read their laptop, or press <kbd>E</kbd> (or click) on a desk to open the full terminal, send them instructions, stop them or hand them another issue. Aim at an empty desk and press <kbd>E</kbd> to hire, or click it and confirm.
+          Each agent is a real coding agent running in its own terminal, working in its own git worktree. Walk up behind them to read their laptop, or press <kbd>E</kbd> (or click) on a desk to open their terminal: watch it live, type into it, send them instructions, stop them or hand them another issue. Aim at an empty desk and press <kbd>E</kbd> to hire, or click it and confirm.
         </p>
         <h3>The QA lab</h3>
         <p>
