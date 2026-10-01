@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CODEX_HOOK_EVENTS, codexHookCommand, hookReviewKey, interruptions, launchArgs, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { CODEX_HOOK_EVENTS, codexHookCommand, hookReviewKey, interruptions, launchArgs, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -136,6 +136,27 @@ describe('launchArgs', () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
     for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
     expect(config({}).autoupdate).toBe(false);
+  });
+});
+
+describe('oneAtATime', () => {
+  it("runs a thread's archive and unarchive in order, other threads alongside, past a step that fails", async () => {
+    const steps = oneAtATime();
+    const done: string[] = [];
+    let release!: () => void;
+    const exited = new Promise<void>((r) => (release = r));
+    const archive = steps('a', async () => {
+      await exited;
+      done.push('archive a');
+      throw new Error('already archived');
+    });
+    const unarchive = steps('a', async () => void done.push('unarchive a'));
+    await steps('b', async () => void done.push('archive b'));
+    expect(done).toEqual(['archive b']);
+    release();
+    await expect(archive).resolves.toBeUndefined();
+    await unarchive;
+    expect(done).toEqual(['archive b', 'archive a', 'unarchive a']);
   });
 });
 

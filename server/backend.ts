@@ -52,7 +52,7 @@ export interface Backend {
   /** The office follows those CLIs' sessions again: hooks that waited for it can come in. */
   hooksReady(): void;
   /** The office is stopping: its CLIs carry on in the keeper through a restart (true), or stop with it. */
-  releaseClis(restart: boolean): void;
+  releaseClis(restart: boolean): Promise<void>;
   /** The coding-agent CLIs installed on this machine. */
   detectClis(): Promise<CliView[]>;
   /** Run a floor's app for the preview monitor (its own worktree, its own port). */

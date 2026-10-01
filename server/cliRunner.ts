@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
-import { cliLabel, CODEX_HOOK_SOURCE, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
+import { cliLabel, CODEX_HOOK_SOURCE, codexThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
   clip,
@@ -186,18 +186,27 @@ const ALLOW = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDec
 
 const toolInput = (b: Record<string, unknown>) => (b.tool_input && typeof b.tool_input === 'object' ? b.tool_input : {}) as Record<string, unknown>;
 
-/** Close a CLI for good. */
-function endLive(live: LiveCli) {
-  if (lives.get(live.term) !== live) return;
+/** The CLI has exited, or has had a few seconds to. */
+const exitOf = (p: Pty) =>
+  new Promise<void>((resolve) => {
+    p.onExit(() => resolve());
+    setTimeout(resolve, 5000);
+  });
+
+/** Close a CLI for good. A Codex thread is archived once its CLI is gone (see codexThread). */
+function endLive(live: LiveCli): Promise<void> {
+  if (lives.get(live.term) !== live) return Promise.resolve();
   lives.delete(live.term);
   clearTimeout(live.idleTimer);
   routes.delete(live.token);
   live.term.releaseIdle = null;
   live.term.bind(null);
+  const gone = live.proc ? exitOf(live.proc) : undefined;
   live.proc?.kill();
   live.proc = null;
   live.term.note(`── ${cliLabel(live.cli)} session ended ──`);
   fs.rm(live.dir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
+  return live.cli === 'codex' && live.resumeId ? codexThread('archive', live.resumeId, gone) : Promise.resolve();
 }
 
 /** What the keeper holds with a CLI's terminal, so the office can pick it up again after a restart. */
@@ -261,6 +270,7 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
     const term = meta.agentId ? terminalFor(meta.agentId) : null;
     if (h.exit !== null || !term || lives.has(term) || !isCli(meta.cli) || !meta.token || !meta.dir || !meta.agentId) {
       discardPty(h);
+      if (meta.cli === 'codex' && meta.resumeId) void codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
     const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, proc: adoptPty(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null };
@@ -286,10 +296,10 @@ export function officeProcesses(): { pids: number[]; markers: string[] } {
 
 /**
  * The office is stopping. On a restart its CLIs carry on in the terminal keeper, which holds their output and hooks
- * until it's back; when it quits for good they stop with it.
+ * until it's back; when it quits for good they stop with it (once they're gone, their Codex threads are archived).
  */
-export function releaseClis(restart: boolean) {
-  if (!restart) for (const l of [...lives.values()]) endLive(l);
+export async function releaseClis(restart: boolean): Promise<void> {
+  if (!restart) await Promise.all([...lives.values()].map(endLive)); // their exits come through the keeper
   leaveKeeper();
 }
 
@@ -659,50 +669,56 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   term.note(`── ${label}${opts.label ? ` · ${opts.label}` : ''} ──`);
   const resumeId = cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null);
   const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, proc: null, token, dir, resumeId, statusLine, shots: new Set(), session: { hook, exited } };
-  let p: Pty;
-  try {
-    p = spawnPty(cmd.file, [...cmd.args, ...launch.args], { cols: term.cols, rows: term.rows, cwd: opts.cwd, env }, metaOf(l));
-  } catch (err) {
-    setTimeout(() => finish({ ok: false, text: '', errors: [`Could not start ${label}: ${(err as Error).message}`] }), 0);
-    return handle;
-  }
-  l.proc = p;
-  live = l;
-  wire(l, opts.office);
-  shotTimer = setInterval(collectShots, 2000);
+  const begin = () => {
+    if (done) return; // stopped while its thread was being unarchived
+    let p: Pty;
+    try {
+      p = spawnPty(cmd.file, [...cmd.args, ...launch.args], { cols: term.cols, rows: term.rows, cwd: opts.cwd, env }, metaOf(l));
+    } catch (err) {
+      setTimeout(() => finish({ ok: false, text: '', errors: [`Could not start ${label}: ${(err as Error).message}`] }), 0);
+      return;
+    }
+    l.proc = p;
+    live = l;
+    wire(l, opts.office);
+    shotTimer = setInterval(collectShots, 2000);
 
-  // Starting up: answer the folder-trust question for the office's own worktrees (the answer that trusts it), and
-  // say so when a CLI is waiting on something only the manager can do (signing in).
-  screenTimer = setInterval(() => {
-    if (done || Date.now() - started > BOOT_MS * 2) return clearInterval(screenTimer);
-    const screen = term.screen();
-    const review = hookReviewKey(screen);
-    const key = trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
-    if (key === 'down') {
-      trustKeys += 1;
-      quietly(() => p.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
-    } else if (key === 'enter') {
-      trustKeys += 1;
-      trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
-      if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
-      else if (!hooksHinted) {
-        hooksHinted = true;
-        log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
+    // Starting up: answer the folder-trust question for the office's own worktrees (the answer that trusts it), and
+    // say so when a CLI is waiting on something only the manager can do (signing in).
+    screenTimer = setInterval(() => {
+      if (done || Date.now() - started > BOOT_MS * 2) return clearInterval(screenTimer);
+      const screen = term.screen();
+      const review = hookReviewKey(screen);
+      const key = trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
+      if (key === 'down') {
+        trustKeys += 1;
+        quietly(() => p.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
+      } else if (key === 'enter') {
+        trustKeys += 1;
+        trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
+        if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
+        else if (!hooksHinted) {
+          hooksHinted = true;
+          log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
+        }
+        quietly(() => p.write('\r'));
       }
-      quietly(() => p.write('\r'));
-    }
-    if (!nudged.has('login') && /Not logged in|run \/login|Select login method|Sign in with ChatGPT|Please login|Invalid API key/i.test(screen)) {
-      nudged.add('login');
-      log([{ kind: 'error', text: `⚠ ${label} needs you to sign in: open the terminal and sign in there, or run "${cli}" in a terminal of your own.` }]);
-    } else if (!nudged.has('setup') && !trustKey(screen) && Date.now() - trustedAt > 5000 && /Choose the text style|Press Enter to continue|Bypass Permissions mode|Settings Error/i.test(screen)) {
-      // First-run screens only the manager should answer: the CLI waits for them in the terminal.
-      nudged.add('setup');
-      log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
-    }
-  }, 1000);
-  bootTimer = setTimeout(() => {
-    if (!done && !begun && cli === 'claude') log([{ kind: 'error', text: `⚠ ${label} hasn't started on the task yet. Open the terminal to see what it's waiting for.` }]);
-  }, BOOT_MS);
+      if (!nudged.has('login') && /Not logged in|run \/login|Select login method|Sign in with ChatGPT|Please login|Invalid API key/i.test(screen)) {
+        nudged.add('login');
+        log([{ kind: 'error', text: `⚠ ${label} needs you to sign in: open the terminal and sign in there, or run "${cli}" in a terminal of your own.` }]);
+      } else if (!nudged.has('setup') && !trustKey(screen) && Date.now() - trustedAt > 5000 && /Choose the text style|Press Enter to continue|Bypass Permissions mode|Settings Error/i.test(screen)) {
+        // First-run screens only the manager should answer: the CLI waits for them in the terminal.
+        nudged.add('setup');
+        log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
+      }
+    }, 1000);
+    bootTimer = setTimeout(() => {
+      if (!done && !begun && cli === 'claude') log([{ kind: 'error', text: `⚠ ${label} hasn't started on the task yet. Open the terminal to see what it's waiting for.` }]);
+    }, BOOT_MS);
+  };
+  // Codex won't resume a thread the office archived (see codexThread): it's unarchived first.
+  if (cli === 'codex' && opts.resumeSessionId) void codexThread('unarchive', opts.resumeSessionId).then(begin);
+  else begin();
 
   return handle;
 }

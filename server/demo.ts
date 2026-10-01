@@ -508,7 +508,7 @@ export function createDemoBackend(): Backend {
     terminals: true,
     reconnectClis: async () => [], // fake sessions end with the office
     hooksReady: () => undefined,
-    releaseClis: () => undefined,
+    releaseClis: async () => undefined,
     detectClis: async () =>
       CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated })),
     previews: demoPreviews,

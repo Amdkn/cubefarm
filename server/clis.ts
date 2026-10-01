@@ -238,6 +238,37 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
   }
 }
 
+// ---------- Codex's saved threads ----------
+
+/** Runs each key's steps one after another; one that fails doesn't hold up the next. */
+export function oneAtATime() {
+  const tails = new Map<string, Promise<void>>();
+  return (key: string, step: () => Promise<unknown>): Promise<void> => {
+    const next = (tails.get(key) ?? Promise.resolve()).then(step).then(
+      () => undefined,
+      () => undefined,
+    );
+    tails.set(key, next);
+    void next.then(() => tails.get(key) === next && tails.delete(key));
+    return next;
+  };
+}
+
+const threadSteps = oneAtATime();
+
+/**
+ * Codex saves every terminal session where the manager's own Codex and ChatGPT apps list it with their chats. The
+ * office archives its threads there once their CLI is gone (`after`), and unarchives one before resuming it: Codex
+ * won't resume an archived thread. A thread's steps run in order; one with nothing to do (already archived) fails.
+ */
+export function codexThread(action: 'archive' | 'unarchive', id: string, after?: Promise<unknown>): Promise<void> {
+  return threadSteps(id, async () => {
+    await after;
+    const cmd = commandFor('codex');
+    if (cmd) await run(cmd.file, [...cmd.args, action, id], { timeoutMs: 30_000 });
+  });
+}
+
 // ---------- prompts the office answers ----------
 
 const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder/i;
