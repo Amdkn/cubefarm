@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import { repoOnFloor, usePhoneBadge, useStore } from '../store';
 import { CEO_ID } from '../../../shared/types';
+import { THEMES, type ThemeId } from '../../../shared/theme';
+import { api } from '../api';
 import { HeldHint } from './HeldHint';
 import { WorkersPanel } from './WorkersPanel';
 import { officeUpdateChip } from '../officeUpdate';
@@ -84,6 +86,23 @@ export function HUD() {
         <span className="pill">
           ⚙️ {settings.sessionLimit ? `${running}/${settings.sessionLimit}` : running} sessions
         </span>
+        <select
+          className="pill"
+          value={useStore((s) => s.theme)}
+          onChange={(e) => {
+            const next = e.target.value as ThemeId;
+            useStore.getState().setTheme(next);
+            void api.updateSettings({ theme: next }).catch(() => undefined);
+          }}
+          title="Switch UI theme profile"
+          style={{ cursor: 'pointer', padding: '1px 6px', fontSize: '0.8rem', border: '2px solid var(--ink)' }}
+        >
+          {Object.values(THEMES).map((t) => (
+            <option key={t.id} value={t.id}>
+              🎨 {t.name}
+            </option>
+          ))}
+        </select>
         {user && <span className="pill">🐙 {user}</span>}
       </div>
 

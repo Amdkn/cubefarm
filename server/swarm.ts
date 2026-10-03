@@ -471,6 +471,7 @@ export class Swarm {
         phoneReadAt: loaded.phoneReadAt ?? 0,
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
+      if (!this.state.settings.theme) this.state.settings.theme = 'aspace';
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
       if (this.state.settings.runtime !== 'sdk') this.state.settings.runtime = 'terminal';
       if (!isCli(this.state.settings.defaultCli)) this.state.settings.defaultCli = 'claude';
@@ -2129,6 +2130,7 @@ export class Swarm {
 
   updateSettings(patch: Partial<SwarmSettings>) {
     const s = this.state.settings;
+    if (patch.theme !== undefined && (patch.theme === 'aspace' || patch.theme === 'uupm-dark' || patch.theme === 'uupm-light')) s.theme = patch.theme;
     if (patch.sessionLimit !== undefined) s.sessionLimit = Math.max(0, Math.round(Number(patch.sessionLimit)) || 0);
     // The default model belongs to the default coding agent: a new agent starts on its own default.
     if (isCli(patch.defaultCli) && patch.defaultCli !== s.defaultCli) {

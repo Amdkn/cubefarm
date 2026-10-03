@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { DEFAULT_THEME_ID, type ThemeId } from '../../shared/theme';
+import { applyTheme, loadSavedTheme, saveThemePreference } from './theme';
 import { blockers } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
@@ -59,6 +61,7 @@ interface State {
   officeUpdate?: OfficeUpdateView;
   usage: UsageView; // Claude's subscription usage: normal, pacing after a warning, or paused at the limit
   restarting: boolean; // the connection dropped because the office is restarting to update
+  theme: ThemeId;
 
   floor: number; // 0 = lobby
   travel: { to: number; phase: 'closing' | 'opening' } | null;
@@ -75,6 +78,7 @@ interface State {
   setConnected(v: boolean): void;
   setRestarting(v: boolean): void;
   setOfficeUpdate(u: OfficeUpdateView): void;
+  setTheme(themeId: ThemeId): void;
   openOverlay(o: Overlay | null): void;
   setFocus(f: Focus | null): void;
   /** Pick something up (or swap), or let go of it with null. Always ends a charge. */
@@ -118,6 +122,9 @@ export function saveView(v: SavedView) {
 }
 const LOG_KEEP = 600;
 
+const initialTheme: ThemeId = loadSavedTheme() ?? DEFAULT_THEME_ID;
+applyTheme(initialTheme);
+
 export const useStore = create<State>((set, get) => ({
   connected: false,
   loaded: false,
@@ -125,8 +132,10 @@ export const useStore = create<State>((set, get) => ({
   ghReady: true,
   demo: false,
   workspaceRoot: '',
+  theme: initialTheme,
   // Until the server's snapshot arrives; setupDone stays true so the wizard doesn't flash while loading.
   settings: {
+    theme: initialTheme,
     sessionLimit: 0,
     defaultModel: 'claude-opus-5-5',
     defaultEffort: 'medium',
@@ -184,8 +193,12 @@ export const useStore = create<State>((set, get) => ({
         for (const q of d.qa) qa[qaKey(q.repoId, q.prNumber)] = q;
         // Stay on the current (or remembered) floor if it still exists; otherwise go to the lobby.
         const floorExists = d.repos.some((r) => r.floor === get().floor);
+        const serverTheme = d.settings.theme;
+        const currentTheme = loadSavedTheme() ?? serverTheme ?? DEFAULT_THEME_ID;
+        applyTheme(currentTheme);
         set({
           loaded: true,
+          theme: currentTheme,
           user: d.user,
           ghReady: d.ghReady,
           ghError: d.ghError,
@@ -264,9 +277,16 @@ export const useStore = create<State>((set, get) => ({
         set({ qa });
         break;
       }
-      case 'settings':
-        set({ settings: ev.settings });
+      case 'settings': {
+        if (ev.settings.theme && ev.settings.theme !== get().theme) {
+          saveThemePreference(ev.settings.theme);
+          applyTheme(ev.settings.theme);
+          set({ theme: ev.settings.theme, settings: ev.settings });
+        } else {
+          set({ settings: ev.settings });
+        }
         break;
+      }
       case 'clis':
         set({ clis: ev.clis });
         break;
@@ -311,6 +331,11 @@ export const useStore = create<State>((set, get) => ({
   setConnected: (connected) => set({ connected }),
   setRestarting: (restarting) => set({ restarting }),
   setOfficeUpdate: (officeUpdate) => set({ officeUpdate }),
+  setTheme: (themeId) => {
+    saveThemePreference(themeId);
+    applyTheme(themeId);
+    set((s) => ({ theme: themeId, settings: { ...s.settings, theme: themeId } }));
+  },
   openOverlay(overlay) {
     // Opening any panel drops whatever you're carrying, so nothing is left floating behind it.
     set(overlay ? { overlay, focus: null, held: null, chargeAt: null } : { overlay });
