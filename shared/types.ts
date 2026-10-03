@@ -224,7 +224,10 @@ export interface QaView {
   updatedAt: number;
 }
 
+import type { ThemeId } from './theme';
+
 export interface SwarmSettings {
+  theme?: ThemeId;
   sessionLimit: number; // most Claude Code sessions running at once; 0 = no limit
   defaultModel: string;
   defaultEffort: EffortLevel;

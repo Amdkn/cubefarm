@@ -3,6 +3,7 @@ import { api } from '../api';
 import { PreviewPill, PreviewSettings } from './AppViewer';
 import { agentsOnRepo, pendingRequests, useStore, type ManagerTab } from '../store';
 import { CEO_ID, type AgentCli, type CliView, type EffortLevel, type OfficeUpdateView, type RepoView } from '../../../shared/types';
+import { THEMES, type ThemeId } from '../../../shared/theme';
 import { effectiveModel } from '../../../shared/models';
 import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../officeUpdate';
 import { confirmDialog } from './Confirm';
@@ -647,16 +648,36 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
 
 function SettingsTab() {
   const settings = useStore((s) => s.settings);
+  const currentTheme = useStore((s) => s.theme);
+  const setTheme = useStore((s) => s.setTheme);
   const clis = useStore((s) => s.clis);
   const user = useStore((s) => s.user);
   const workspaceRoot = useStore((s) => s.workspaceRoot);
   const demo = useStore((s) => s.demo);
   const set = (p: Parameters<typeof api.updateSettings>[0]) => void attempt(() => api.updateSettings(p));
+  const handleThemeChange = (newTheme: ThemeId) => {
+    setTheme(newTheme);
+    void attempt(() => api.updateSettings({ theme: newTheme }));
+  };
   const terminal = settings.runtime === 'terminal';
   const defaultCli = terminal ? settings.defaultCli : 'claude';
   return (
     <div className="tab-grid">
       <div className="card">
+        <h3>🎨 Interface Theme</h3>
+        <label className="field">
+          <span>Theme Profile</span>
+          <select value={currentTheme} onChange={(e) => handleThemeChange(e.target.value as ThemeId)}>
+            {Object.values(THEMES).map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name} — {t.description}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="muted small">
+          Project bounded design profile recovering UUPM / Business OS Multi-Theme system into the CubeFarm UI.
+        </p>
         <h3>🧠 Agents</h3>
         {terminal && (
           <label className="field">
