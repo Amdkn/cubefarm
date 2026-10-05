@@ -1,0 +1,17 @@
+{
+  "name": "A'Space CubeFarm",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:24-bookworm",
+  "features": { "ghcr.io/devcontainers/features/github-cli:1": {} },
+  "remoteUser": "node",
+  "containerEnv": {
+    "SWARM_HOME": "/workspaces/.aspace-cubefarm",
+    "SWARM_PORT": "4417"
+  },
+  "forwardPorts": [4417],
+  "portsAttributes": {
+    "4417": { "label": "A'Space CubeFarm", "onAutoForward": "openBrowser" }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash .devcontainer/office.sh start",
+  "waitFor": "postCreateCommand"
+}
