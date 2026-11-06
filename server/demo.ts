@@ -6,6 +6,7 @@ import type { Backend } from './backend.ts';
 import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { CLIS } from './clis.ts';
+import { ASPACE_3OS_FLOORS } from '../shared/aspaceHolons.ts';
 import { FLOOR_SEATS, type GhRepoSummary, type IssueInfo, type PullInfo } from '../shared/types.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR, type DemoScale } from './config.ts';
@@ -105,19 +106,10 @@ function seed(fullName: string, description: string, titles: [string, string][])
   repos.set(fullName, r);
 }
 
-seed('demo-co/pixel-todo', 'A cheerful todo app', [
-  ['Add dark mode toggle', 'Users want a dark theme. Persist the choice in localStorage.'],
-  ['Todos should support due dates', 'Add an optional due date and highlight overdue items.'],
-  ['Drag and drop to reorder', 'Let users reorder todos by dragging.'],
-  ['Empty state illustration', 'Show a friendly illustration when the list is empty.'],
-  ['Keyboard shortcuts', 'N for new todo, / to search, ? for help.'],
-  ['Fix: completed count off by one', 'The footer shows one more completed item than there is.'],
-]);
-seed('demo-co/weather-api', 'Tiny weather REST API', [
-  ['Add /forecast endpoint', 'Return a 5-day forecast for a city.'],
-  ['Rate limit anonymous callers', '60 requests per minute per IP.'],
-  ['OpenAPI spec', 'Publish an OpenAPI 3.1 document at /openapi.json.'],
-]);
+// Seed the 3 canonical A'Space OS Holonic Floors (Floor 1: Tech OS, Floor 2: Life OS 2026, Floor 3: Areas OS)
+for (const osFloor of ASPACE_3OS_FLOORS) {
+  seed(osFloor.fullName, osFloor.displayName, osFloor.seedIssues);
+}
 
 // ---------- the big company (--floors / --agents, #228) ----------
 

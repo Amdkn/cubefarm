@@ -1,5 +1,6 @@
 import { memo, useMemo } from 'react';
 import { useShallow } from 'zustand/react/shallow';
+import { formatFloorOsLabel } from '../../../shared/aspaceHolons';
 import type { RepoView } from '../../../shared/types';
 import { EMPTY_NUMBERS, signLine } from '../ops';
 import { agentsOnRepo, floorPrCounts, useStore } from '../store';
@@ -70,7 +71,8 @@ export const OfficeFloor = memo(function OfficeFloor({ repo }: { repo: RepoView 
   // Mission control's numbers for this floor, compact, on its team sign; the beacon on top spins while something here needs you.
   const ops = useStore((s) => signLine(s.ops.floors.find((f) => f.repoId === repo.id) ?? EMPTY_NUMBERS));
   const { alarm, ref: signRef } = useFloorAlarm(repo.id);
-  const name = repo.fullName.split('/')[1] ?? repo.fullName;
+  const osLabel = formatFloorOsLabel(repo.floor, repo.fullName);
+  const name = osLabel.title;
   const rugColor = shade(repo.color, 0.24);
   // whose lunch the tupperware in the fridge might be
   const lunchNames = agents.filter((a) => a.role !== 'ceo').map((a) => a.name).join('\n');
@@ -126,9 +128,9 @@ export const OfficeFloor = memo(function OfficeFloor({ repo }: { repo: RepoView 
             1024,
             317,
             [
-              { text: `FLOOR ${repo.floor}`, size: 58, color: 'rgba(255,255,255,0.85)', weight: 600 },
-              { text: repo.fullName, size: 74 },
-              { text: repo.description || 'no description', size: 36, weight: 500, color: 'rgba(255,255,255,0.85)' },
+              { text: `FLOOR ${repo.floor} · ${osLabel.badge}`, size: 52, color: 'rgba(255,255,255,0.88)', weight: 600 },
+              { text: osLabel.title, size: 64 },
+              { text: repo.description || osLabel.subtitle, size: 34, weight: 500, color: 'rgba(255,255,255,0.85)' },
             ],
             repo.color,
           )

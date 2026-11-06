@@ -64,6 +64,7 @@ import { parsePongResult, PONG_PLAYER, recordGame } from '../shared/pong.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { DEFAULT_WEATHER, DEFAULT_WORLD_EVENTS, weatherSettings, worldEventSettings } from '../shared/outside.ts';
 import { DEFAULT_THEME_SETTINGS, dueGreeting, themeSettings } from '../shared/themes.ts';
+import { CEO_HOLON_PROFILE, getOsFloorSpec, HOLON_AGENT_NAMES } from '../shared/aspaceHolons.ts';
 import { CEO_ID, DEFAULT_DOG_NAME, DEFAULT_MAX_AGENTS, FLOOR_SEATS, INSTALL_STEP } from '../shared/types.ts';
 import type {
   AgentActivity,
@@ -285,8 +286,9 @@ const FLOOR_COLORS = ['#ff8a5b', '#4fb3e8', '#8fd14f', '#c77dff', '#ffc93c', '#f
 const SHIRTS = ['#e63946', '#457b9d', '#2a9d8f', '#f4a261', '#9b5de5', '#f15bb5', '#00bbf9', '#06d6a0', '#ffbe0b', '#8338ec', '#fb5607', '#3a86ff'];
 const HAIR = HAIR_COLORS;
 const SKIN = SKIN_TONES;
-// New agents are named after computing pioneers, then fictional detectives.
+// New agents are named after A'Space OS Holons first (S1-Rick, Ryan-Build, A1-Beth, B1-Book-LD01, etc.), then computing pioneers.
 const NAMES = [
+  ...HOLON_AGENT_NAMES,
   'Ada', 'Linus', 'Grace', 'Alan', 'Margaret', 'Dennis', 'Barbara', 'Ken', 'Radia', 'Guido', 'Hedy', 'Tim', 'Katherine',
   'Bjarne', 'Frances', 'Edsger', 'Anita', 'Donald', 'Sophie', 'Yukihiro', 'Jean', 'Niklaus', 'Karen', 'Brendan',
   'Sherlock', 'Marple', 'Poirot', 'Nancy', 'Columbo', 'Fletcher', 'Watson', 'Morse', 'Holmes', 'Maigret',
@@ -309,10 +311,10 @@ const LOOKS: AgentLook[] = ['feminine', 'masculine'];
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-// The CEO thinks harder than the staff: Opus 5.5 at xhigh effort unless the manager changes it.
+// The CEO is A0 Amadeus (aspace:a0:amadeus), Amadou Kone's 24/7 Digital Twin CEO running at xhigh effort.
 const CEO_MODEL = 'claude-opus-5-5';
 const CEO_EFFORT: EffortLevel = 'xhigh';
-const CEO_NAME = 'Morgan';
+const CEO_NAME = CEO_HOLON_PROFILE.name;
 // The CEO's own folder: its notes about the company live here. Repos are read through their clones.
 const CEO_DIR = path.join(HOME_DIR, 'ceo');
 const DEFAULT_PROJECTS_DIR = defaultProjectsDir(path.resolve(import.meta.dirname, '..'));
@@ -836,8 +838,12 @@ export class Swarm {
     }
 
     if (this.backend.demo && this.state.repos.length === 0) {
-      // The demo opens on a busy office; the tutorial still runs so it can be tried.
-      Object.assign(this.state.settings, { setupDone: true, managerName: 'Demo Manager', companyName: 'Demo Co.' });
+      // The demo opens on A'Space OS V5's 3 Holonic OS Floors supervised by A0 Amadeus for Amadou Kone.
+      Object.assign(this.state.settings, {
+        setupDone: true,
+        managerName: CEO_HOLON_PROFILE.sovereignHuman,
+        companyName: CEO_HOLON_PROFILE.companyName,
+      });
       for (const r of await this.backend.listMyRepos()) {
         const repo = await this.connectRepo(r.nameWithOwner);
         const size = Math.min(this.backend.demoTeam?.(repo.floor) ?? 4, FLOOR_SEATS);
@@ -1409,6 +1415,7 @@ export class Swarm {
     const meta = await this.backend.repoMeta(fullName);
     const folder = opts.localPath ?? (await this.projectFolderFor(meta.nameWithOwner));
     const floor = this.state.repos.reduce((m, r) => Math.max(m, r.floor), 0) + 1;
+    const osFloor = getOsFloorSpec(meta.nameWithOwner) ?? getOsFloorSpec(floor);
     const repo: PersistedRepo = {
       id: meta.nameWithOwner,
       fullName: meta.nameWithOwner,
@@ -1416,15 +1423,15 @@ export class Swarm {
       url: meta.url,
       defaultBranch: meta.defaultBranch,
       floor,
-      color: FLOOR_COLORS[(floor - 1) % FLOOR_COLORS.length],
+      color: osFloor?.color ?? FLOOR_COLORS[(floor - 1) % FLOOR_COLORS.length],
       autoAssign: !!opts.autoAssign,
       autoMerge: true,
       browserTesting: true,
       links: [],
       localPath: folder,
-      mission: (opts.mission ?? '').trim().slice(0, 4000),
-      summary: '',
-      qaBrief: '',
+      mission: (opts.mission ?? osFloor?.mission ?? '').trim().slice(0, 4000),
+      summary: (osFloor?.summary ?? '').slice(0, 140),
+      qaBrief: (osFloor?.qaBrief ?? '').slice(0, 2500),
       preview: { ...DEFAULT_PREVIEW, env: {} },
       addedAt: Date.now(),
     };
