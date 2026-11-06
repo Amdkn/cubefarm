@@ -1,6 +1,18 @@
-﻿import { useStore } from './store';
+import { useStore } from './store';
 import { restartExpected, shouldReload } from './officeUpdate';
-import type { ClientEvent, ServerEvent } from '../../shared/types';
+import {
+  CEO_ID,
+  DEFAULT_DOG_NAME,
+  DEFAULT_MAX_AGENTS,
+  type AgentLook,
+  type AgentRole,
+  type AgentView,
+  type ClientEvent,
+  type RepoView,
+  type ServerEvent,
+  type WorldSnapshot,
+} from '../../shared/types';
+import { DEFAULT_WEATHER, DEFAULT_WORLD_EVENTS, EMPTY_WEATHER_VIEW } from '../../shared/outside';
 import { currentWatch } from './watch';
 import { hitchWs } from './hitches';
 
@@ -19,7 +31,20 @@ let watching = false;
 // Back from the time-lapse: everything waits for the fresh snapshot asked for, so nothing applies on top of the replay.
 let awaitingSnapshot = false;
 // Presence too: the other visitors are live people, there in a replay as much as in the live office.
-const OUTSIDE_REPLAY = new Set<ServerEvent['type']>(['notify', 'notifyChannels', 'settings', 'officeUpdate', 'clis', 'voiceKey', 'voiceCache', 'progress', 'visitors', 'visitorPose', 'visitorEmote', 'visitorPing']);
+const OUTSIDE_REPLAY = new Set<ServerEvent['type']>([
+  'notify',
+  'notifyChannels',
+  'settings',
+  'officeUpdate',
+  'clis',
+  'voiceKey',
+  'voiceCache',
+  'progress',
+  'visitors',
+  'visitorPose',
+  'visitorEmote',
+  'visitorPing',
+]);
 let opens = 0;
 /** Characters in and out on /ws since the page loaded, and in for presence alone (its probe turns them into rates). */
 export const wsTraffic = { in: 0, out: 0, presence: 0 };
@@ -65,58 +90,220 @@ function reloadForNewCommit(commit: string): boolean {
   return true;
 }
 
-/** Fallback autonome A'Space OS V5 si aucun serveur Swarm n'est joint apres 1,5s (ex. Vercel) */
+/** Fallback autonome A'Space OS V5 si aucun serveur Swarm n'est joint apres 1,2s (ex. Vercel) */
 function injectAutonomousOrbit() {
-  const autonomousSnapshot: any = {
+  const defaultSettings = {
+    sessionLimit: 0,
+    defaultModel: 'claude-opus-5-5',
+    defaultEffort: 'medium' as const,
+    runtime: 'terminal' as const,
+    defaultCli: 'claude' as const,
+    scaling: 'approve' as const,
+    maxAgents: DEFAULT_MAX_AGENTS,
+    ceoHeartbeatMin: 60,
+    managerName: 'Amadou Kone',
+    companyName: 'Aspace OS V5 · City Office',
+    dogName: DEFAULT_DOG_NAME,
+    projectsDir: '',
+    setupDone: true,
+    tutorialStep: -1,
+    pacingSessions: 3,
+    trimIdleDesksMin: 120,
+    voice: { provider: 'off' as const, voiceId: '', voiceName: '', model: '', speakOffice: false, keepDays: 7 },
+    themes: { mode: 'auto' as const, disabled: [], birthday: null },
+    weather: DEFAULT_WEATHER,
+    worldEvents: DEFAULT_WORLD_EVENTS,
+    listen: { provider: 'off' as const, autoSend: false, handsFree: false },
+    notify: {
+      events: { needsHuman: true, ceoMessage: true, hire: true, agentError: true, usage: true, merge: true },
+      channels: { desktop: false, push: false, ntfy: false },
+      officeUrl: '',
+    },
+    cloud: { machineKind: 'local' as const, boxSize: 'small' as const, boxLimit: 10 },
+  };
+
+  const makeRepo = (id: string, name: string, floor: number, color: string, mission: string): RepoView => ({
+    id,
+    fullName: `Amdkn/${name}`,
+    description: mission,
+    url: `https://github.com/Amdkn/${name}`,
+    defaultBranch: 'main',
+    floor,
+    color,
+    autoAssign: false,
+    autoMerge: false,
+    folderSync: 'in sync',
+    browserTesting: false,
+    links: [],
+    mission,
+    summary: mission,
+    qaBrief: 'Standard Aspace QA checks',
+    localPath: null,
+    checkoutPath: '',
+    cloneStatus: 'ready',
+    issues: [
+      {
+        number: 1,
+        title: `${name} Holonic Gateway Ready`,
+        body: 'Autonomous loop verified',
+        url: `https://github.com/Amdkn/${name}/issues/1`,
+        labels: ['enhancement'],
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    pulls: [],
+    held: [],
+    lastSync: Date.now(),
+    previewConfig: { command: null, env: {} },
+    preview: {
+      status: 'stopped',
+      port: 5000 + floor,
+      url: null,
+      ref: 'main',
+      pr: null,
+      commit: 'aspace-v5',
+      startedAt: null,
+      error: null,
+      logTail: [],
+    },
+  });
+
+  const repos: RepoView[] = [
+    makeRepo('fkb00', 'FKB00_Runtime', 1, '#6366f1', 'Tech OS Kernel & Multi-Harness Engine'),
+    makeRepo('fkb01', 'FKB01_Inference', 2, '#06b6d4', 'Sovereign Inference & Local LLM Mesh'),
+    makeRepo('fkb02', 'FKB02_Memory', 3, '#8b5cf6', 'Neuro-Symbolic Memory & Shared Brain'),
+    makeRepo('fkb03', 'FKB03_3DWorlds', 4, '#ec4899', 'City Office 3D & World Engineering'),
+    makeRepo('fkb06', 'FKB06_Video_SaaS', 5, '#ef4444', 'Automated Video Studio & Saas Engine'),
+    makeRepo('fkb07', 'FKB07_Money_Maker', 6, '#10b981', 'B2B Monetization & Algo Trading Bots'),
+  ];
+
+  const makeAgent = (
+    id: string,
+    name: string,
+    repoId: string,
+    role: AgentRole,
+    desk: number,
+    color: string,
+    hair: string,
+    skin: string,
+    look: AgentLook = 'masculine',
+  ): AgentView => ({
+    id,
+    name,
+    repoId,
+    role,
+    look,
+    task: null,
+    desk,
+    color,
+    hair,
+    skin,
+    style: null,
+    model: 'claude-sonnet-4-5',
+    effort: 'medium',
+    cli: 'claude',
+    host: 'local',
+    terminal: false,
+    status: 'idle',
+    issueNumber: null,
+    issueTitle: null,
+    branch: null,
+    prNumber: null,
+    prUrl: null,
+    currentTool: null,
+    startedAt: Date.now(),
+    endedAt: null,
+    costUsd: 0,
+    turns: 0,
+    browserUrl: null,
+    hasScreenshot: false,
+    screenshotAt: null,
+    lastError: null,
+    career: null,
+    log: [],
+    activity: null,
+  });
+
+  const agents: AgentView[] = [
+    makeAgent(CEO_ID, 'A0-AMADEUS', 'fkb00', 'ceo', 0, '#e63946', '#2b2118', '#f1c27d'),
+    makeAgent('s1', 'S1-RICK', 'fkb00', 'agent', 1, '#3a86ff', '#ffffff', '#f1c27d'),
+    makeAgent('a1', 'A1-BETH', 'fkb00', 'agent', 2, '#9b5de5', '#e7c496', '#f1c27d', 'feminine'),
+    makeAgent('s3', 'S3-GRAHAM', 'fkb00', 'agent', 3, '#06d6a0', '#4a3728', '#f1c27d'),
+  ];
+
+  const autonomousSnapshot: { type: 'snapshot'; data: WorldSnapshot } = {
     type: 'snapshot',
     data: {
       user: 'Amadou Kone (S0)',
       ghReady: true,
       demo: true,
       machinesRoot: '',
-      settings: { theme: 'default', sound: false },
-      repos: [
-        { id: 'fkb00', name: 'FKB00_Runtime', floor: 1, color: '#6366f1' },
-        { id: 'fkb01', name: 'FKB01_Inference', floor: 2, color: '#06b6d4' },
-        { id: 'fkb02', name: 'FKB02_Memory', floor: 3, color: '#8b5cf6' },
-        { id: 'fkb03', name: 'FKB03_3DWorlds', floor: 4, color: '#ec4899' },
-        { id: 'fkb06', name: 'FKB06_Video_SaaS', floor: 5, color: '#ef4444' },
-        { id: 'fkb07', name: 'FKB07_Money_Maker', floor: 6, color: '#10b981' },
-      ],
-      agents: [
-        { id: 'a0', name: 'A0-AMADEUS', role: 'Architect CEO', status: 'idle', floor: 1, desk: 1 },
-        { id: 's1', name: 'S1-RICK', role: 'Outside Judge 7/7', status: 'working', floor: 1, desk: 2 },
-        { id: 'a1', name: 'A1-BETH', role: 'Nocturnal Sanctuary', status: 'idle', floor: 1, desk: 3 },
-        { id: 's3', name: 'S3-GRAHAM', role: '7D Weight Distiller', status: 'idle', floor: 1, desk: 4 },
-      ],
-      logs: [],
-      screens: [],
+      settings: defaultSettings,
+      repos,
+      agents,
       qa: [],
       prPreviews: [],
       requests: [],
-      ceo: null,
-      messages: [],
+      ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
+      messages: [
+        {
+          id: 1,
+          from: 'ceo',
+          text: 'Welcome to Aspace OS V5 City Office. The sovereign mesh and 6 FKB poles are initialized and running.',
+          at: Date.now(),
+        },
+      ],
       phoneReadAt: Date.now(),
       version: '0.3.20-aspace-v5',
       officeCommit: 'aspace-v5',
-      officeUpdate: null,
-      usage: null,
-      ops: null,
+      officeUpdate: undefined,
+      usage: { state: 'normal', until: null, warning: null },
+      ops: {
+        floors: [],
+        total: {
+          ready: 6,
+          building: 0,
+          inQa: 0,
+          fixing: 0,
+          toMerge: 0,
+          needsYou: 0,
+          triage: 0,
+          mergedToday: 0,
+          mergedHour: 0,
+          spark: [0, 0, 0, 0, 0, 0],
+          leadMs: null,
+          qaWaitMs: null,
+          qaPass: 1.0,
+          ciPass: 1.0,
+          ciRuns: 6,
+          ciMs: 30000,
+          busy: 0,
+          idle: 4,
+          errors: 0,
+          costToday: 0,
+        },
+        ceoCostToday: 0,
+        alarms: [],
+      },
       doctor: [],
-      clis: [],
+      clis: [
+        { id: 'claude', label: 'Claude Code', installed: true, version: '1.5.0', integrated: true },
+        { id: 'codex', label: 'Codex CLI', installed: true, version: '1.0.0', integrated: true },
+        { id: 'opencode', label: 'OpenCode', installed: true, version: '1.19.5', integrated: true },
+      ],
       voiceKeySet: false,
       voiceKeyHint: '',
       voiceCache: { clips: 0, bytes: 0, saved: [] },
-      weather: null,
+      weather: EMPTY_WEATHER_VIEW,
       ticker: [],
-      notifyChannels: [],
-      cloud: null,
+      notifyChannels: { webhooks: { ntfy: { set: false, hint: '' } }, pushDevices: 0 },
+      cloud: undefined,
       progress: { floors: {}, achievements: [], coffees: 0, merges: 0 },
       pong: {},
     },
   };
   useStore.getState().setConnected(true);
-  useStore.getState().apply(autonomousSnapshot);
+  useStore.getState().apply(autonomousSnapshot as ServerEvent);
 }
 
 export function connect() {
@@ -142,7 +329,7 @@ export function connect() {
       } catch {}
       injectAutonomousOrbit();
     }
-  }, 1500);
+  }, 1200);
 
   let ws: WebSocket;
   try {
@@ -195,4 +382,3 @@ export function connect() {
     setTimeout(connect, Math.min(restarting ? 2000 : 8000, 500 * 2 ** retry++));
   };
 }
-
