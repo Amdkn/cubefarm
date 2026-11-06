@@ -65,6 +65,61 @@ function reloadForNewCommit(commit: string): boolean {
   return true;
 }
 
+
+/** Fallback autonome A'Space OS V5 si aucun serveur Swarm n'est joint après 1,5s (ex. Vercel) */
+function injectAutonomousOrbit() {
+  const autonomousSnapshot: any = {
+    type: 'snapshot',
+    data: {
+      user: 'Amadou Kone (S0)',
+      ghReady: true,
+      demo: true,
+      machinesRoot: '',
+      settings: { theme: 'default', sound: false },
+      repos: [
+        { id: 'fkb00', name: 'FKB00_Runtime', floor: 1, color: '#6366f1' },
+        { id: 'fkb01', name: 'FKB01_Inference', floor: 2, color: '#06b6d4' },
+        { id: 'fkb02', name: 'FKB02_Memory', floor: 3, color: '#8b5cf6' },
+        { id: 'fkb03', name: 'FKB03_3DWorlds', floor: 4, color: '#ec4899' },
+        { id: 'fkb06', name: 'FKB06_Video_SaaS', floor: 5, color: '#ef4444' },
+        { id: 'fkb07', name: 'FKB07_Money_Maker', floor: 6, color: '#10b981' },
+      ],
+      agents: [
+        { id: 'a0', name: 'A0-AMADEUS', role: 'Architect CEO', status: 'idle', floor: 1, desk: 1 },
+        { id: 's1', name: 'S1-RICK', role: 'Outside Judge 7/7', status: 'working', floor: 1, desk: 2 },
+        { id: 'a1', name: 'A1-BETH', role: 'Nocturnal Sanctuary', status: 'idle', floor: 1, desk: 3 },
+        { id: 's3', name: 'S3-GRAHAM', role: '7D Weight Distiller', status: 'idle', floor: 1, desk: 4 },
+      ],
+      logs: [],
+      screens: [],
+      qa: [],
+      prPreviews: [],
+      requests: [],
+      ceo: null,
+      messages: [],
+      phoneReadAt: Date.now(),
+      version: '0.3.20-aspace-v5',
+      officeCommit: 'aspace-v5',
+      officeUpdate: null,
+      usage: null,
+      ops: null,
+      doctor: [],
+      clis: [],
+      voiceKeySet: false,
+      voiceKeyHint: '',
+      voiceCache: { clips: 0, bytes: 0, saved: [] },
+      weather: null,
+      ticker: [],
+      notifyChannels: [],
+      cloud: null,
+      progress: { floors: {}, achievements: [], coffees: 0, merges: 0 },
+      pong: {},
+    },
+  };
+  useStore.getState().setConnected(true);
+  useStore.getState().apply(autonomousSnapshot);
+}
+
 export function connect() {
   // subscribed here, not as the module loads: the store imports this module (through presence) before it exists
   if (!watching) {
@@ -115,3 +170,4 @@ export function connect() {
     setTimeout(connect, Math.min(restarting ? 2000 : 8000, 500 * 2 ** retry++));
   };
 }
+
