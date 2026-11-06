@@ -1,4 +1,4 @@
-import { useStore } from './store';
+﻿import { useStore } from './store';
 import { restartExpected, shouldReload } from './officeUpdate';
 import type { ClientEvent, ServerEvent } from '../../shared/types';
 import { currentWatch } from './watch';
@@ -65,8 +65,7 @@ function reloadForNewCommit(commit: string): boolean {
   return true;
 }
 
-
-/** Fallback autonome A'Space OS V5 si aucun serveur Swarm n'est joint après 1,5s (ex. Vercel) */
+/** Fallback autonome A'Space OS V5 si aucun serveur Swarm n'est joint apres 1,5s (ex. Vercel) */
 function injectAutonomousOrbit() {
   const autonomousSnapshot: any = {
     type: 'snapshot',
@@ -127,9 +126,35 @@ export function connect() {
     useStore.subscribe(sendWatch);
   }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const customWs = (import.meta as any).env?.VITE_SWARM_WS_URL;
+  const wsTarget =
+    customWs ||
+    (location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+      ? `${proto}://${location.host}/ws`
+      : 'wss://swarm.aspaceos.tech/ws');
+
+  let settled = false;
+  const fallbackTimer = setTimeout(() => {
+    if (!settled && !useStore.getState().loaded) {
+      settled = true;
+      try {
+        if (socket && socket.readyState !== WebSocket.OPEN) socket.close();
+      } catch {}
+      injectAutonomousOrbit();
+    }
+  }, 1500);
+
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(wsTarget);
+  } catch {
+    injectAutonomousOrbit();
+    return;
+  }
   socket = ws;
   ws.onopen = () => {
+    settled = true;
+    clearTimeout(fallbackTimer);
     retry = 0;
     sentWatch = '';
     opens++;
