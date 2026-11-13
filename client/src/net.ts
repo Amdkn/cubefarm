@@ -287,7 +287,7 @@ function injectAutonomousOrbit() {
       },
       doctor: [],
       clis: [
-        { id: 'claude', label: 'Claude Code', installed: true, version: '1.5.0', integrated: true },
+        { id: 'claude', label: 'Herdr · OpenRig', installed: true, version: '1.5.0', integrated: true },
         { id: 'codex', label: 'Codex CLI', installed: true, version: '1.0.0', integrated: true },
         { id: 'opencode', label: 'OpenCode', installed: true, version: '1.19.5', integrated: true },
       ],

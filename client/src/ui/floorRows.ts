@@ -28,7 +28,7 @@ const STATUS_WORDS: Record<AgentStatus, string> = {
 };
 
 /** The coding agents' names until the office has listed them (CliView.label). */
-const CLI_NAMES: Record<AgentCli, string> = { claude: 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
+const CLI_NAMES: Record<AgentCli, string> = { claude: 'Herdr · OpenRig', codex: 'Herdr · Codex', opencode: 'Herdr · OpenCode' };
 
 type Runtime = Pick<SwarmSettings, 'runtime' | 'defaultCli'>;
 
@@ -38,7 +38,7 @@ export const workerCli = (a: Pick<Agent, 'cli' | 'role'>, settings: Runtime): Ag
 
 /** What someone is, in a word or two: the CEO, or the coding agent they run. */
 export function agentLabel(a: Pick<Agent, 'cli' | 'role'>, settings: Runtime, clis: CliView[]): string {
-  if (a.role === 'ceo') return 'CEO';
+  if (a.role === 'ceo') return 'Automaton CEO · 7D';
   const id = workerCli(a, settings);
   return clis.find((c) => c.id === id)?.label ?? CLI_NAMES[id];
 }

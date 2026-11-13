@@ -253,10 +253,18 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
   // Arrive at the elevator whenever the floor changes; after a page reload, return to the remembered spot.
   const restored = useRef(false);
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const fromStreet = !restored.current && urlParams.get('spawn') === 'street';
     const saved = restored.current ? null : loadView();
     restored.current = true;
     perched.current = null; // a perch left behind on the old floor doesn't stand you at its exit here
-    if (saved && saved.floor === floor) {
+    if (fromStreet) {
+      urlParams.delete('spawn');
+      const qs = urlParams.toString();
+      window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
+      camera.position.set(-17.2, EYE_HEIGHT, 4.5);
+      look.current = { yaw: -Math.PI / 2, pitch: -0.04 };
+    } else if (saved && saved.floor === floor) {
       camera.position.set(saved.x, EYE_HEIGHT, saved.z);
       look.current = { yaw: saved.yaw, pitch: saved.pitch };
     } else {

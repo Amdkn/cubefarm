@@ -1,3 +1,4 @@
+import { useStore } from '../store';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Outlines } from './Outlines';
@@ -5,8 +6,8 @@ import * as THREE from 'three';
 import { doorSlide } from '../ui/sfx';
 import { playerAt } from './camera/rig';
 import { doorOpen, resetDoors, tickDoors } from './doors';
-import { drawFacade } from './draw';
-import { BALCONY, BALCONY_LIGHTS, BALCONY_OUT, BENCH, FLOOR_HEIGHT, HALF_D, HALF_W, PLANTER, SIDE_DOOR, SIDE_OPENINGS, SIDES, WALL_H, WALL_T, WINDOW, balconyFurniture, floorElevation, sideSign, type Side } from './layout';
+import { drawFacade, SANS } from './draw';
+import { ROOF, BALCONY, BALCONY_LIGHTS, BALCONY_OUT, BENCH, FLOOR_HEIGHT, HALF_D, HALF_W, PLANTER, SIDE_DOOR, SIDE_OPENINGS, SIDES, WALL_H, WALL_T, WINDOW, balconyFurniture, floorElevation, sideSign, type Side } from './layout';
 import { toon, toonMap } from './materials';
 import { OutsideSounds } from './OutsideSounds';
 import { doorWalkers } from './hiringState';
@@ -108,7 +109,7 @@ function balconyGeometry(floor: number, top: number) {
   const patio: BoxSpec[] = [];
   const glass: BoxSpec[] = [];
   const rails: BoxSpec[] = [];
-  for (let f = 0; f <= top + 1; f++) {
+  for (let f = 0; f <= top; f++) {
     const y = (f - floor) * FLOOR_HEIGHT;
     for (const side of SIDES) {
       const s = sideSign(side);
@@ -117,14 +118,41 @@ function balconyGeometry(floor: number, top: number) {
       const out = s * (BALCONY_OUT - railT / 2);
       const across = s * (IN + (depth - railT) / 2);
       const paneH = rail - 0.14;
-      glass.push({ size: [0.03, paneH, LEN - railT * 2], at: [out, y + 0.06 + paneH / 2, MID_Z] });
-      rails.push({ size: [railT + 0.03, 0.07, LEN], at: [out, y + rail - 0.035, MID_Z] });
+      if (f === 0) {
+        // Ground-floor Lobby patio: open a 2.7m exit gate opposite each sliding glass door + street porch walkway
+        const doorZ = SIDE_OPENINGS.lobby[side].door;
+        const gapHalf = 1.35;
+        const zNorth0 = minZ + railT;
+        const zNorth1 = doorZ - gapHalf;
+        const zSouth0 = doorZ + gapHalf;
+        const zSouth1 = maxZ - railT;
+        if (zNorth1 > zNorth0) {
+          glass.push({ size: [0.03, paneH, zNorth1 - zNorth0], at: [out, y + 0.06 + paneH / 2, (zNorth0 + zNorth1) / 2] });
+          rails.push({ size: [railT + 0.03, 0.07, zNorth1 - minZ], at: [out, y + rail - 0.035, (minZ + zNorth1) / 2] });
+        }
+        if (zSouth1 > zSouth0) {
+          glass.push({ size: [0.03, paneH, zSouth1 - zSouth0], at: [out, y + 0.06 + paneH / 2, (zSouth0 + zSouth1) / 2] });
+          rails.push({ size: [railT + 0.03, 0.07, maxZ - zSouth0], at: [out, y + rail - 0.035, (zSouth0 + maxZ) / 2] });
+        }
+        for (const gz of [zNorth1, zSouth0]) {
+          rails.push({ size: [0.09, rail + 0.15, 0.09], at: [out, y + (rail + 0.15) / 2, gz] });
+        }
+        // Street exit porch walkway extending out past BALCONY_OUT toward the road
+        patio.push({ size: [3.2, slab, 2.9], at: [s * (BALCONY_OUT + 1.6), y - slab / 2, doorZ] });
+      } else {
+        glass.push({ size: [0.03, paneH, LEN - railT * 2], at: [out, y + 0.06 + paneH / 2, MID_Z] });
+        rails.push({ size: [railT + 0.03, 0.07, LEN], at: [out, y + rail - 0.035, MID_Z] });
+      }
       for (const z of [minZ + railT / 2, maxZ - railT / 2]) {
         glass.push({ size: [depth - railT, paneH, 0.03], at: [across, y + 0.06 + paneH / 2, z] });
         rails.push({ size: [depth, 0.07, railT + 0.03], at: [s * (IN + depth / 2), y + rail - 0.035, z] });
         for (const x of [IN + 0.05, IN + depth / 2]) rails.push({ size: [0.07, rail, 0.07], at: [s * x, y + rail / 2, z] });
       }
-      for (let k = 0; k <= 10; k++) rails.push({ size: [0.07, rail, 0.07], at: [out, y + rail / 2, minZ + railT / 2 + (k * (LEN - railT)) / 10] });
+      for (let k = 0; k <= 10; k++) {
+        const kz = minZ + railT / 2 + (k * (LEN - railT)) / 10;
+        if (f === 0 && Math.abs(kz - SIDE_OPENINGS.lobby[side].door) < 1.38) continue;
+        rails.push({ size: [0.07, rail, 0.07], at: [out, y + rail / 2, kz] });
+      }
     }
   }
   return { slabs: boxesGeometry(slabs), patio: boxesGeometry(patio), glass: boxesGeometry(glass), rails: boxesGeometry(rails) };
@@ -167,6 +195,8 @@ function furnitureGeometry(kind: FloorKind) {
 const BULB_HALOS = BALCONY_LIGHTS.map((l): [number, number, number] => [l.x, l.y + 0.055, l.z]);
 
 function Balconies({ kind, floor, top }: { kind: FloorKind; floor: number; top: number }) {
+  const currentFloor = useStore((s) => s.floor);
+  if (floor === ROOF || currentFloor === ROOF || floor < 0) return null;
   const shell = useMemo(() => balconyGeometry(floor, top), [floor, top]);
   const stuff = useMemo(() => furnitureGeometry(kind), [kind]);
   useEffect(() => () => [...Object.values(shell), ...Object.values(stuff)].forEach((g) => g.dispose()), [shell, stuff]);
@@ -260,13 +290,100 @@ export function BuildingBelow({ top }: { top: number }) {
   );
 }
 
+let streetSignTex: THREE.CanvasTexture | null = null;
+function streetExitTexture() {
+  if (streetSignTex) return streetSignTex;
+  const c = document.createElement('canvas');
+  c.width = 768;
+  c.height = 192;
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = '#1f1d2b';
+  ctx.fillRect(0, 0, 768, 192);
+  ctx.strokeStyle = '#ff8a5b';
+  ctx.lineWidth = 10;
+  ctx.strokeRect(8, 8, 752, 176);
+  ctx.fillStyle = '#ffd166';
+  ctx.font = `700 40px ${SANS}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🏙️ SORTIE · AGENT-OFFICE & SCENIC LOOP', 384, 72);
+  ctx.fillStyle = '#a8dadc';
+  ctx.font = `600 28px ${SANS}`;
+  ctx.fillText('Avancer sur le perron ou [E] pour sortir dans la rue', 384, 134);
+  streetSignTex = new THREE.CanvasTexture(c);
+  streetSignTex.colorSpace = THREE.SRGBColorSpace;
+  return streetSignTex;
+}
+
+function StreetExitPortals({ floor }: { floor: number }) {
+  const currentFloor = useStore((s) => s.floor);
+  if (floor !== 0 || currentFloor !== 0) return null;
+  const exiting = useRef(false);
+  const signTex = useMemo(() => streetExitTexture(), []);
+
+  const triggerStreetExit = useCallback(() => {
+    if (exiting.current) return;
+    exiting.current = true;
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const targetUrl = isLocal ? 'http://localhost:5173/?spawn=cubefarm-exit' : 'https://agent-office-ten-delta.vercel.app/?spawn=cubefarm-exit';
+    window.location.href = targetUrl;
+  }, []);
+
+  useEffect(() => {
+    if (floor !== 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'KeyE') return;
+      for (const side of SIDES) {
+        const doorZ = SIDE_OPENINGS.lobby[side].door;
+        const gateX = sideSign(side) * BALCONY_OUT;
+        if (Math.abs(playerAt.x - gateX) < 2.2 && Math.abs(playerAt.z - doorZ) < 1.8) {
+          triggerStreetExit();
+          break;
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [floor, triggerStreetExit]);
+
+  useFrame(() => {
+    if (floor !== 0 || exiting.current) return;
+    if (Math.abs(playerAt.x) > BALCONY_OUT + 0.35) {
+      triggerStreetExit();
+    }
+  });
+
+  if (floor !== 0) return null;
+
+  return (
+    <group>
+      {SIDES.map((side) => {
+        const s = sideSign(side);
+        const doorZ = SIDE_OPENINGS.lobby[side].door;
+        const archX = s * (BALCONY_OUT - 0.04);
+        return (
+          <group key={side} position={[archX, 2.38, doorZ]} rotation={[0, s < 0 ? Math.PI / 2 : -Math.PI / 2, 0]}>
+            <mesh>
+              <boxGeometry args={[2.75, 0.68, 0.08]} />
+              <meshBasicMaterial map={signTex} />
+            </mesh>
+          </group>
+        );
+      })}
+    </group>
+  );
+}
+
 /** Everything outside the side walls, for floor `floor` of a building whose top floor is `top`. */
 export function Outside({ kind, floor, top }: { kind: FloorKind; floor: number; top: number }) {
+  const currentFloor = useStore((s) => s.floor);
+  if (floor === ROOF || currentFloor === ROOF || floor < 0) return null;
   return (
     <group>
       <SideDoors kind={kind} floor={floor} />
       <OutsideSounds kind={kind} />
       <Balconies kind={kind} floor={floor} top={Math.max(top, floor)} />
+      <StreetExitPortals floor={floor} />
       <Facade floor={floor} top={Math.max(top, floor)} />
     </group>
   );

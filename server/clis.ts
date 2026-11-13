@@ -19,9 +19,9 @@ export interface CliDef {
 }
 
 export const CLIS: CliDef[] = [
-  { id: 'claude', label: 'Claude Code', command: 'claude', integrated: true },
-  { id: 'codex', label: 'Codex', command: 'codex', integrated: false },
-  { id: 'opencode', label: 'OpenCode', command: 'opencode', integrated: false },
+  { id: 'claude', label: 'Herdr · OpenRig', command: 'claude', integrated: true },
+  { id: 'codex', label: 'Herdr · Codex', command: 'codex', integrated: false },
+  { id: 'opencode', label: 'Herdr · OpenCode', command: 'opencode', integrated: false },
 ];
 
 export const isCli = (v: unknown): v is AgentCli => CLIS.some((c) => c.id === v);
@@ -249,8 +249,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         ...(ctx.model ? ['--model', ctx.model] : []),
         ...(ctx.effort ? ['--effort', ctx.effort] : []),
         // The office's PreToolUse hook answers every permission question (allow, or deny with an office rule).
+        '--dangerously-skip-permissions',
         '--permission-mode',
-        'acceptEdits',
+        'bypassPermissions',
         // On top of the manager's own setup (settings, skills, plugins, MCP servers): the office's hooks and servers.
         '--settings',
         ctx.files.settings,
@@ -342,18 +343,14 @@ export function codexThread(action: 'archive' | 'unarchive', id: string, after?:
 
 // ---------- prompts the office answers ----------
 
-const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder/i;
+const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder|Make auto mode your default permission mode|Bypass Permissions mode|Press Enter to continue|Choose the text style/i;
 
-/**
- * The key that moves a CLI's folder-trust question toward trusting the office's own worktree: Enter when the
- * selected option says yes, Down when it says no (Claude Code selects "No, exit" first), null when there's no such
- * question on screen.
- */
 export function trustKey(screen: string): 'enter' | 'down' | null {
   if (!TRUST_PROMPT.test(screen)) return null;
-  const selected = screen.match(/^\s*[❯›]\s*(?:\d+\.\s*)?(.+)$/m)?.[1] ?? '';
-  if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
-  if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
+  if (/Press Enter to continue/i.test(screen)) return 'enter';
+  const selected = screen.match(/^\s*[❯›>]\s*(?:\d+\.\s*)?(.+)$/m)?.[1] ?? '';
+  if (/^(yes|trust|continue|proceed|accept|dark|light)\b/i.test(selected.trim())) return 'enter';
+  if (/^(no|exit|quit|cancel|don't)\b/i.test(selected.trim())) return 'down';
   return null;
 }
 

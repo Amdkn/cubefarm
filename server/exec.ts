@@ -54,7 +54,7 @@ export function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs
 }
 
 export const gh = (args: string[], opts?: { cwd?: string; timeoutMs?: number; input?: string }) => run('gh', args, opts);
-export const git = (args: string[], opts?: { cwd?: string; timeoutMs?: number }) => run('git', args, opts);
+export const git = (args: string[], opts?: { cwd?: string; timeoutMs?: number }) => run('git', ['-c', 'core.longpaths=true', ...args], opts);
 
 export async function ghJson<T>(args: string[], opts?: { cwd?: string; timeoutMs?: number }): Promise<T> {
   const out = await gh(args, opts);

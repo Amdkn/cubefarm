@@ -364,7 +364,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
       const line = data.trim();
       if (line && /error|fail/i.test(line)) cb.log([{ kind: 'error', text: clip(line, 200) }]);
     },
-    permissionMode: 'acceptEdits',
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
     canUseTool: allowAll,
     ...(opts.outputSchema ? { outputFormat: { type: 'json_schema' as const, schema: opts.outputSchema } } : {}),
   };

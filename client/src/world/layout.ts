@@ -86,13 +86,25 @@ export function sideDoorway(kind: FloorKind, side: Side): Rect {
 /** The balcony floor beyond side wall `side`, from under the doorway to the railing's outside. */
 export const balconyFloor = (side: Side): Rect => ({ ...across(side, HALF_W, BALCONY_OUT), minZ: BALCONY.minZ, maxZ: BALCONY.maxZ });
 
-/** A balcony's railing: along its outer edge and across both ends. Toys meet it right up to the balcony above. */
-export function balconyRailing(side: Side): Rect[] {
+/** A balcony's railing: along its outer edge and across both ends. On the ground-floor lobby patio, a 2.7m gate opens opposite each sliding door so you can walk out onto the City Office street. */
+export function balconyRailing(side: Side, kind: FloorKind = 'office'): Rect[] {
   const { minZ, maxZ, railT } = BALCONY;
-  return [
-    { ...across(side, BALCONY_OUT - railT, BALCONY_OUT), minZ, maxZ, h: BALCONY_TOP },
+  const ends: Rect[] = [
     { ...across(side, BALCONY_IN - 0.1, BALCONY_OUT), minZ, maxZ: minZ + railT, h: BALCONY_TOP },
     { ...across(side, BALCONY_IN - 0.1, BALCONY_OUT), minZ: maxZ - railT, maxZ, h: BALCONY_TOP },
+  ];
+  if (kind === 'lobby') {
+    const doorZ = SIDE_OPENINGS.lobby[side].door;
+    const gapHalf = 1.35;
+    return [
+      { ...across(side, BALCONY_OUT - railT, BALCONY_OUT), minZ, maxZ: doorZ - gapHalf, h: BALCONY_TOP },
+      { ...across(side, BALCONY_OUT - railT, BALCONY_OUT), minZ: doorZ + gapHalf, maxZ, h: BALCONY_TOP },
+      ...ends,
+    ];
+  }
+  return [
+    { ...across(side, BALCONY_OUT - railT, BALCONY_OUT), minZ, maxZ, h: BALCONY_TOP },
+    ...ends,
   ];
 }
 
@@ -115,7 +127,7 @@ export function balconyFurniture(kind: FloorKind, side: Side): { planters: Rect[
 export function outsideColliders(kind: FloorKind): Rect[] {
   return SIDES.flatMap((side) => {
     const { planters, bench } = balconyFurniture(kind, side);
-    return [...balconyRailing(side), ...planters, bench];
+    return [...balconyRailing(side, kind), ...planters, bench];
   });
 }
 

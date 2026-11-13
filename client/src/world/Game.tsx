@@ -142,7 +142,7 @@ export function Game() {
       <Batches key={onRoof ? 'roof' : (repoId ?? 'lobby')}>
         <Suspense fallback={null}>{onRoof ? <Roof top={top} /> : repoId ? <OfficeRoom key={repoId} repoId={repoId} /> : <Lobby />}</Suspense>
       </Batches>
-      {!onRoof && <Outside key={isOffice ? floor : 0} kind={isOffice ? 'office' : 'lobby'} floor={isOffice ? floor : 0} top={top} />}
+      {floor !== ROOF && !onRoof && <Outside key={isOffice ? `office-${floor}` : 'lobby'} kind={isOffice ? 'office' : 'lobby'} floor={isOffice ? floor : 0} top={top} />}
       <ThemeLayer key={onRoof ? ROOF : isOffice ? floor : 0} kind={onRoof ? 'roof' : isOffice ? 'office' : 'lobby'} floor={onRoof ? ROOF : isOffice ? floor : 0} top={top} repoId={repoId} />
       <Player colliders={colliders} floor={floor} />
       <Presence />

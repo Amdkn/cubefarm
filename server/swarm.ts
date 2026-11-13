@@ -64,7 +64,7 @@ import { parsePongResult, PONG_PLAYER, recordGame } from '../shared/pong.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { DEFAULT_WEATHER, DEFAULT_WORLD_EVENTS, weatherSettings, worldEventSettings } from '../shared/outside.ts';
 import { DEFAULT_THEME_SETTINGS, dueGreeting, themeSettings } from '../shared/themes.ts';
-import { CEO_HOLON_PROFILE, getOsFloorSpec, HOLON_AGENT_NAMES } from '../shared/aspaceHolons.ts';
+import { CEO_HOLON_PROFILE, getHolonSpec, getOsFloorSpec, HOLON_AGENT_NAMES } from '../shared/aspaceHolons.ts';
 import { CEO_ID, DEFAULT_DOG_NAME, DEFAULT_MAX_AGENTS, FLOOR_SEATS, INSTALL_STEP } from '../shared/types.ts';
 import type {
   AgentActivity,
@@ -287,12 +287,7 @@ const SHIRTS = ['#e63946', '#457b9d', '#2a9d8f', '#f4a261', '#9b5de5', '#f15bb5'
 const HAIR = HAIR_COLORS;
 const SKIN = SKIN_TONES;
 // New agents are named after A'Space OS Holons first (S1-Rick, Ryan-Build, A1-Beth, B1-Book-LD01, etc.), then computing pioneers.
-const NAMES = [
-  ...HOLON_AGENT_NAMES,
-  'Ada', 'Linus', 'Grace', 'Alan', 'Margaret', 'Dennis', 'Barbara', 'Ken', 'Radia', 'Guido', 'Hedy', 'Tim', 'Katherine',
-  'Bjarne', 'Frances', 'Edsger', 'Anita', 'Donald', 'Sophie', 'Yukihiro', 'Jean', 'Niklaus', 'Karen', 'Brendan',
-  'Sherlock', 'Marple', 'Poirot', 'Nancy', 'Columbo', 'Fletcher', 'Watson', 'Morse', 'Holmes', 'Maigret',
-];
+const NAMES = [...HOLON_AGENT_NAMES];
 
 // Names that get the feminine character look: everyone in the name pool above, plus common first names
 // for agents the manager names themselves. The manager can always change an agent's look in the console.
@@ -306,7 +301,7 @@ const FEMININE_NAMES = new Set(
     'stella susan tess tessa tina vera victoria yuki zara zoe'
   ).split(' '),
 );
-const lookFor = (name: string): AgentLook => (FEMININE_NAMES.has(name.trim().split(/\s+/)[0].toLowerCase()) ? 'feminine' : 'masculine');
+const lookFor = (name: string): AgentLook => getHolonSpec(name)?.look ?? (FEMININE_NAMES.has(name.trim().split(/\s+/)[0].toLowerCase()) ? 'feminine' : 'masculine');
 const LOOKS: AgentLook[] = ['feminine', 'masculine'];
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -680,6 +675,125 @@ export class Swarm {
 
   // ---------- lifecycle ----------
 
+
+  private migrateAspaceV5Symbiosis() {
+    if (this.backend.demo) return;
+    let changed = false;
+    const targetCompany = "A'Space OS V5 · Symbiose Automaton × Infinity × OpenRig × Herdr";
+    const targetManager = "Amadou Kone (S0 · 10D)";
+    if (this.state.settings.companyName !== targetCompany) {
+      this.state.settings.companyName = targetCompany;
+      changed = true;
+    }
+    if (this.state.settings.managerName !== targetManager) {
+      this.state.settings.managerName = targetManager;
+      changed = true;
+    }
+
+    // Ensure Floor 1 is Amdkn/Aspace_OS_V5 connected directly to the local V5 workspace
+    const floor1 = this.state.repos.find((r) => r.floor === 1);
+    if (floor1 && (floor1.fullName !== "Amdkn/Aspace_OS_V5" || floor1.localPath !== "C:\\Users\\amado\\Aspace OS V5")) {
+      floor1.fullName = "Amdkn/Aspace_OS_V5";
+      floor1.url = "https://github.com/Amdkn/Aspace_OS_V5";
+      floor1.localPath = "C:\\Users\\amado\\Aspace OS V5";
+      floor1.color = "#38bdf8";
+      floor1.description = "L0 Tech OS & Symbiotic Singularity · Automaton × Infinity × OpenRig × Herdr · 578 Holons";
+      floor1.summary = "L0 Tech OS & Singularité Symbiotique · Automaton × Infinity × OpenRig × Herdr · 578 Holons";
+      floor1.mission = "Opérer Aspace OS V5 dans la Singularité de Symbiose entre Automaton (A0 Amadeus CEO 24/7 + 4D Loop S0..S3), Infinity (Infinite-Brain-OS + 00_Memoire/shared_brain), OpenRig (Gate-Lane Ledger/Lock & Holon Rigs) et Herdr (Cockpit Multi-Terminaux hc).";
+      floor1.qaBrief = "Vérifier npm run typecheck, 02_Factory/checks.ps1 (6 gates déterministes), intégrité append-only de 00_Memoire/bundle/log.md et validation par Outside Judge (S3-Yaz / S1-Rick).";
+      changed = true;
+    }
+
+    const legacyMap: Record<string, string> = {
+      Ada: "S3-Ryan (Build)",
+      Linus: "S3-Graham (State)",
+      Grace: "A1-Beth (Shield)",
+      Alan: "S3-Amy (Herdr UI)",
+      Margaret: "B1-Book (OMK LD01)",
+      Dennis: "A2-Zora (LifeWheel)",
+      Barbara: "S3-Clara (Forge)",
+      Ken: "S1-Rick (Gate)",
+      Radia: "S3-Yaz (Observe)",
+      Guido: "S2-D12 (Buzz)",
+    };
+
+    for (const a of this.state.agents) {
+      if (a.role === "ceo") {
+        if (a.name !== CEO_HOLON_PROFILE.name) {
+          a.name = CEO_HOLON_PROFILE.name;
+          a.color = '#f59e0b';
+          changed = true;
+        }
+        continue;
+      }
+      if (legacyMap[a.name]) {
+        a.name = legacyMap[a.name];
+        changed = true;
+      }
+      const spec = getHolonSpec(a.name);
+      if (spec) {
+        if (a.look !== spec.look || a.color !== spec.color) {
+          a.look = spec.look;
+          a.color = spec.color;
+          changed = true;
+        }
+      }
+      // Clear any stale preparing state from before the core.longpaths / V5 migration
+      if (a.status === "preparing") {
+        a.status = "idle";
+        a.task = null;
+        a.issueNumber = null;
+        a.issueTitle = null;
+        a.branch = null;
+        a.startedAt = null;
+        a.lastError = null;
+        changed = true;
+      }
+    }
+
+    // Ensure Floor 8 (02-ABC-OS) has its Kernel Orchestrator Holon if empty
+    const floor8 = this.state.repos.find((r) => r.floor === 8);
+    if (floor8 && !this.state.agents.some((a) => a.repoId === floor8.id)) {
+      const d13Spec = getHolonSpec("S2-D13 (Kernel)");
+      this.state.agents.push({
+        id: "agent-aspace-d13-kernel",
+        name: "S2-D13 (Kernel)",
+        repoId: floor8.id,
+        role: "agent",
+        look: d13Spec?.look ?? "masculine",
+        task: null,
+        desk: 0,
+        color: d13Spec?.color ?? "#06b6d4",
+        hair: "#1b1b1b",
+        skin: "#c68642",
+        style: null,
+        model: DEFAULT_MODEL,
+        effort: "medium",
+        cli: "",
+        machine: "s2-d13-kernel",
+        status: "idle",
+        issueNumber: null,
+        issueTitle: null,
+        branch: null,
+        prNumber: null,
+        prUrl: null,
+        startedAt: null,
+        endedAt: null,
+        costUsd: 0,
+        turns: 0,
+        sessionId: null,
+        sessionCli: null,
+        lastError: null,
+        logTail: [],
+      });
+      changed = true;
+    }
+
+    if (changed) {
+      this.save();
+    }
+  }
+
   async init() {
     try {
       const raw = await fs.readFile(STATE_FILE, 'utf8');
@@ -778,6 +892,7 @@ export class Swarm {
     } catch {
       // first run
     }
+    this.migrateAspaceV5Symbiosis();
     await this.voice.init();
     await this.weather.init();
     await this.notifier.init();

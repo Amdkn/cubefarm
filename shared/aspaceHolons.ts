@@ -300,3 +300,75 @@ export function buildAmbitionBrief(mandate: string, floorNumber?: number): {
     range: `Replace nouns with verbs of real impact and assemble cross-functional Holon crew (${spec.holonRoster.slice(0, 5).join(', ')}) + Red Team critic (${spec.gatekeepers.join(', ')}).`,
   };
 }
+
+
+export interface CanonicalHolonSpec {
+  name: string;
+  holonId: string;
+  ring: "S1" | "S2" | "S3" | "A1" | "A2" | "B1..I1";
+  floorLayer: "L0 Tech OS" | "L1 Life OS 2026" | "L2 Areas OS";
+  openRigLane: string;
+  look: "masculine" | "feminine";
+  color: string;
+  roleSummary: string;
+}
+
+export const HOLON_SPECS: CanonicalHolonSpec[] = [
+  { name: "S3-Ryan (Build)", holonId: "aspace:s3:ryan", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "BUILD_RIG", look: "masculine", color: "#38bdf8", roleSummary: "Implémentation, worktrees, CI/CD, Forge Runtime et exécution déterministe des Rigs OpenRig." },
+  { name: "S3-Graham (State)", holonId: "aspace:s3:graham", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "STATE_LEDGER", look: "masculine", color: "#a855f7", roleSummary: "État SQLite Pi Durable, Gate-Lane Ledger OpenRig, IPBD, Supabase, replay et provenance." },
+  { name: "S3-Yaz (Observe)", holonId: "aspace:s3:yaz", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "OBSERVE_LIDAR", look: "feminine", color: "#10b981", roleSummary: "Outside Judge indépendant, télémétrie LiDAR, checks déterministes et gouvernance Canary." },
+  { name: "S1-Rick (Gate)", holonId: "aspace:s1:rick", ring: "S1", floorLayer: "L0 Tech OS", openRigLane: "GATE_VETO_R10", look: "masculine", color: "#22d3ee", roleSummary: "Veto épistémique S1 Near, anti-rente Cloud propriétaire et exigence du reçu cryptographique R10 CANARY_RECEIPT." },
+  { name: "S2-D13 (Kernel)", holonId: "aspace:s2:doctor13", ring: "S2", floorLayer: "L0 Tech OS", openRigLane: "KERNEL_ORCHESTRATOR", look: "masculine", color: "#06b6d4", roleSummary: "Manager Kernel Core (L0 BedRock). Orchestre S3-Ryan, S3-Yaz et S3-Graham pour clore les jalons Foundation." },
+  { name: "S3-Amy (Herdr UI)", holonId: "aspace:s3:amy", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "HERDR_INTERFACE", look: "feminine", color: "#f97316", roleSummary: "Spécialiste Interface Humains/Agents/Harnesses, cockpit multi-terminaux Herdr (hc / herdr-app) et exposition 3D." },
+  { name: "S3-Rory (Persist)", holonId: "aspace:s3:rory", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "INFINITY_PERSIST", look: "masculine", color: "#6366f1", roleSummary: "Continuité cognitive Infinite-Brain-OS (Infinity), 00_Memoire/shared_brain, WikiLLM OKF v0.2 et wargames MiroFish." },
+  { name: "S3-River (Flow)", holonId: "aspace:s3:river", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "FLOW_AUTOMATION", look: "feminine", color: "#14b8a6", roleSummary: "Flux GWS/workflows, triggers et exécution rejouable Life-to-Business." },
+  { name: "S2-D11 (Life)", holonId: "aspace:s2:doctor11", ring: "S2", floorLayer: "L0 Tech OS", openRigLane: "LIFE_ORCHESTRATOR", look: "masculine", color: "#8b5cf6", roleSummary: "Manager Life Core. Orchestre S3-Amy, S3-Rory et S3-River." },
+  { name: "S3-Clara (Forge)", holonId: "aspace:s3:clara", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "DESIGN_FORGE", look: "feminine", color: "#ec4899", roleSummary: "Design/Forge, contrats d acceptation, patterns OpenRig et spécifications de construction." },
+  { name: "S3-Bill (Research)", holonId: "aspace:s3:bill", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "RESEARCH_EVIDENCE", look: "masculine", color: "#3b82f6", roleSummary: "Recherche terrain, preuves empiriques, benchmarks et opportunités." },
+  { name: "S3-Nardole (Dispatch)", holonId: "aspace:s3:nardole", ring: "S3", floorLayer: "L0 Tech OS", openRigLane: "DISPATCH_RIG", look: "masculine", color: "#84cc16", roleSummary: "Routage inter-harnesses (Herdr hc, Orca, OpenRig, Pi Durable) et câblage de dépendances." },
+  { name: "S2-D12 (Buzz)", holonId: "aspace:s2:doctor12", ring: "S2", floorLayer: "L0 Tech OS", openRigLane: "BUZZ_ORCHESTRATOR", look: "masculine", color: "#eab308", roleSummary: "Manager Buzz/Business Core. Orchestre S3-Bill, S3-Clara et S3-Nardole." },
+  { name: "A1-Beth (Shield)", holonId: "aspace:a1:beth", ring: "A1", floorLayer: "L1 Life OS 2026", openRigLane: "VITAL_SHIELD", look: "feminine", color: "#f43f5e", roleSummary: "Bouclier homéostatique LD03/LD04 (GREEN | ORANGE | RED | HALT) et sanctuaire nocturne 00h00-05h00." },
+  { name: "A1-Morty (Fallback)", holonId: "aspace:a1:morty", ring: "A1", floorLayer: "L1 Life OS 2026", openRigLane: "READBACK_GUARD", look: "masculine", color: "#fb923c", roleSummary: "Prudence opérationnelle, read-back natif après écriture et fallback manuel réversible." },
+  { name: "A2-Zora (LifeWheel)", holonId: "aspace:a2:zora", ring: "A2", floorLayer: "L1 Life OS 2026", openRigLane: "STARFLEET_ZORA", look: "feminine", color: "#ec4899", roleSummary: "Vaisseau Discovery-Zora : équilibre des 8 Domaines de Vie (Life Wheel) et télémétrie 48 intersections." },
+  { name: "A2-Curie (12WY)", holonId: "aspace:a2:curie", ring: "A2", floorLayer: "L1 Life OS 2026", openRigLane: "STARFLEET_CURIE", look: "feminine", color: "#0ea5e9", roleSummary: "Vaisseau Curie : exécution 12 Week Year (12WY) et vélocité trimestrielle." },
+  { name: "A2-Spock (PARA)", holonId: "aspace:a2:spock", ring: "A2", floorLayer: "L1 Life OS 2026", openRigLane: "STARFLEET_ENTERPRISE", look: "masculine", color: "#6366f1", roleSummary: "Vaisseau Enterprise : architecture PARA (Projects, Areas, Resources, Archives) imbriquant les 522 Holons d Areas OS." },
+  { name: "A2-Cerritos (GTD)", holonId: "aspace:a2:cerritos", ring: "A2", floorLayer: "L1 Life OS 2026", openRigLane: "STARFLEET_CERRITOS", look: "feminine", color: "#10b981", roleSummary: "Vaisseau Cerritos : flux GTD Inbox Zero et délégation immédiate." },
+  { name: "A2-Protostar (DEAL)", holonId: "aspace:a2:protostar", ring: "A2", floorLayer: "L1 Life OS 2026", openRigLane: "STARFLEET_PROTOSTAR", look: "masculine", color: "#f59e0b", roleSummary: "Vaisseau Protostar : automatisation DEAL et élimination de 95% de l entropie 3D." },
+  { name: "B1-Book (OMK LD01)", holonId: "aspace:b1:book", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD01", look: "masculine", color: "#f59e0b", roleSummary: "OwnerBook LD01 Business : SOB/Liberty Ride (8 workflows), Concordia (Fencing Token TTL 300s) & The OMK Office ($360k/an -> $10k/mois net A0)." },
+  { name: "C1-Saru (Finances)", holonId: "aspace:c1:saru", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD02", look: "masculine", color: "#10b981", roleSummary: "OwnerBook LD02 Finances & Patrimoine : trésorerie souveraine, allocation et comptabilité automatisée." },
+  { name: "D1-Culber (Health)", holonId: "aspace:d1:culber", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD03", look: "masculine", color: "#ef4444", roleSummary: "OwnerBook LD03 Santé & Vitalité : biométrie, récupération et prévention." },
+  { name: "E1-Tilly (Relations)", holonId: "aspace:e1:tilly", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD04", look: "feminine", color: "#ec4899", roleSummary: "OwnerBook LD04 Famille & Relations : harmonie relationnelle et temps sanctuarisé." },
+  { name: "F1-Stamets (Growth)", holonId: "aspace:f1:stamets", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD05", look: "masculine", color: "#8b5cf6", roleSummary: "OwnerBook LD05 Croissance & R&D : réseau mycélien de connaissances et MS-CI." },
+  { name: "G1-Burnham (Leisure)", holonId: "aspace:g1:burnham", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD06", look: "feminine", color: "#06b6d4", roleSummary: "OwnerBook LD06 Exploration & Loisirs : régénération créative et voyages." },
+  { name: "H1-Reno (Habitat)", holonId: "aspace:h1:reno", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD07", look: "feminine", color: "#f97316", roleSummary: "OwnerBook LD07 Environnement & Logistique : infrastructure matérielle et résilience." },
+  { name: "I1-Georgiou (Contrib)", holonId: "aspace:i1:georgiou", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "OWNERBOOK_LD08", look: "feminine", color: "#eab308", roleSummary: "OwnerBook LD08 Contribution & Héritage : impact systémique et souveraineté long-terme." },
+  { name: "J1-Jerry (Meta LD09)", holonId: "aspace:j1:jerry", ring: "B1..I1", floorLayer: "L2 Areas OS", openRigLane: "META_CLARITY_LD09", look: "masculine", color: "#38bdf8", roleSummary: "Meta-Jerry (LD09) : test de clarté UX <= 5 secondes et gouvernance d alignement inter-domaines." },
+];
+
+export function getHolonSpec(name: string): CanonicalHolonSpec | null {
+  const clean = name.trim().toLowerCase();
+  return (
+    HOLON_SPECS.find(
+      (h) =>
+        h.name.toLowerCase() === clean ||
+        clean.includes(h.name.split(" ")[0].toLowerCase()) ||
+        clean.includes(h.holonId.split(":").pop()!)
+    ) ?? null
+  );
+}
+
+export function formatHolonSymbiosisPrompt(agentName: string): string {
+  const spec = getHolonSpec(agentName);
+  const identityLine = spec
+    ? `Canonical Holon Identity: ${spec.name} [${spec.holonId}] · Loop Ring: ${spec.ring} (${spec.floorLayer}) · OpenRig Lane: ${spec.openRigLane}. Mandate: ${spec.roleSummary}`
+    : `Canonical Holon Identity: ${agentName} · A'Space OS V5 Autonomous Holon.`;
+  return [
+    "=== A'SPACE OS V5 · SINGULARITÉ DE SYMBIOSE RUNTIME (AUTOMATON × INFINITY × OPENRIG × HERDR) ===",
+    identityLine,
+    "- 1. AUTOMATON (01_Forkable/FKB00_Runtime/01_Holo_TriptyqueCore/automaton) : Tu opères dans la boucle 4D supervisée 24/7 par A0 Amadeus (aspace:a0:amadeus, CEO 7D dans le Lobby) pour décharger Amadou Kone (human:amdkn, S0 Out of the Loop 10D) de 95% de l'entropie 3D.",
+    "- 2. INFINITY (01_Forkable/FKB00_Runtime/01_Holo_TriptyqueCore/infinity) : Continuité cognitive Infinite-Brain-OS reliée au graphe partagé 00_Memoire/shared_brain/memory.jsonl et au WikiLLM OKF v0.2 (00_Memoire/bundle/).",
+    "- 3. OPENRIG (01_Forkable/FKB00_Runtime/01_Holo_TriptyqueCore/openrig) : Exécution gouvernée par Gate-Lane Ledger (gate-lane-ledger.mjs) et Gate-Lane Lock (gate-lane-lock.mjs). Chaque action respecte l'isolation worktree, l'idempotence Pi Durable et la validation par un Outside Judge indépendant (S3-Yaz / S1-Rick).",
+    "- 4. HERDR COCKPIT (hc / herdr-app) : Ton écran de bureau dans CubeFarm est piloté par Herdr · OpenRig en mode bypass souverain (--dangerously-skip-permissions), prêt pour l'orchestration multi-terminaux hc.",
+    "==================================================================================================",
+  ].join("\n");
+}
